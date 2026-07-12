@@ -27,7 +27,7 @@ import tempfile
 import threading
 import time
 from collections import deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence, TypedDict
@@ -54,7 +54,7 @@ ALIGN_MODEL_REVISION = "49402e9577b1158620820667c218cd494cc44486"
 ALIGN_PACKAGE_REPOSITORY = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git"
 ALIGN_PACKAGE_REVISION = "c344f5bc900323aa434a7cb200b7c629d463bd02"
 OUTPUT_SCHEMA_VERSION = 4
-PROFILE_SCHEMA_VERSION = 3
+PROFILE_SCHEMA_VERSION = 4
 SR = 16_000
 ALIGN_WINDOW_S = 30
 ALIGN_CONTEXT_S = 2
@@ -66,8 +66,12 @@ ASR_FIXED_MIN_S = 1.0
 # Keep the accepted range narrow and widen it only after parity tests pass.
 MIN_TRANSFORMERS_VERSION = "5.13.0"
 MAX_TRANSFORMERS_VERSION = "5.14.0"
+SILERO_VERSION = "6.2.1"
 PIPELINE_GROUP_MAX_BYTES = 512 * 1024**2
 PIPELINE_GROUP_MAX_JOBS = 128
+DEFAULT_TORCH_VAD_BATCH_SIZE = 16
+DEFAULT_TORCH_VAD_BLOCK_FRAMES = 512
+MAX_TORCH_VAD_PADDED_FRAMES = 32_768
 ALIGNMENT_GC_INTERVAL = 64
 FFMPEG_DECODE_TIMEOUT_S = 3_600
 OUTPUT_PATH_DISPLAY_LIMIT = 20
@@ -194,6 +198,39 @@ class PreparedAudio:
     vad_fallback_reason: str | None = None
 
 
+@dataclass(slots=True)
+class DecodedAudio:
+    audio: np.ndarray
+    decode_backend: str
+    decode_seconds: float
+
+
+@dataclass(slots=True)
+class VadBatchMetrics:
+    model_load_seconds: float = 0.0
+    inference_seconds: float = 0.0
+    postprocess_seconds: float = 0.0
+    prepared_groups: int = 0
+    model_calls: int = 0
+    valid_frames: int = 0
+    padded_frames: int = 0
+    max_files_per_call: int = 0
+    effective_block_frames: int = 0
+
+
+@dataclass(slots=True)
+class PreparedJobResult:
+    job: AudioJob
+    prepared: PreparedAudio | None = None
+    error: BaseException | None = None
+
+
+@dataclass(slots=True)
+class PreparedGroup:
+    results: list[PreparedJobResult]
+    vad_metrics: VadBatchMetrics = field(default_factory=VadBatchMetrics)
+
+
 @dataclass(frozen=True, slots=True)
 class SegmentRef:
     job: AudioJob
@@ -208,8 +245,19 @@ class SegmentRef:
 
 @dataclass(slots=True)
 class RunStats:
+    input_validation_seconds: float = 0.0
     decode_seconds: float = 0.0
     vad_seconds: float = 0.0
+    vad_model_load_seconds: float = 0.0
+    vad_inference_seconds: float = 0.0
+    vad_postprocess_seconds: float = 0.0
+    vad_prepared_groups: int = 0
+    vad_model_calls: int = 0
+    vad_valid_frames: int = 0
+    vad_padded_frames: int = 0
+    vad_max_files_per_call: int = 0
+    vad_effective_block_frames: int = 0
+    preparation_wait_seconds: float = 0.0
     asr_load_seconds: float = 0.0
     asr_seconds: float = 0.0
     asr_feature_seconds: float = 0.0
@@ -220,6 +268,7 @@ class RunStats:
     align_load_seconds: float = 0.0
     emissions_seconds: float = 0.0
     viterbi_seconds: float = 0.0
+    post_asr_seconds: float = 0.0
     peak_cuda_gib: float = 0.0
     peak_cuda_reserved_gib: float = 0.0
     cuda_total_gib: float = 0.0
@@ -273,6 +322,9 @@ class TranscriptionConfig:
     pipeline_preparation: bool
     vad: str
     vad_engine: str
+    vad_batch_size: int
+    vad_block_frames: int
+    vad_threads: int | None
     vad_merge: bool
     min_dur: float
     max_dur: float
@@ -298,57 +350,6 @@ class TranscriptionConfig:
     max_cue_dur: float
     max_gap: float
     profile_json: str | None
-
-
-class BoundedPrefetch:
-    """Keep at most ``depth`` preprocessing results resident ahead of the consumer."""
-
-    def __init__(
-        self,
-        items: Sequence[AudioJob],
-        fn: Callable[[AudioJob], object],
-        workers: int,
-        depth: int | None = None,
-        refill_before_yield: bool = True,
-    ) -> None:
-        self._items = iter(items)
-        self._fn = fn
-        self._workers = max(1, workers)
-        self._depth = max(1, depth or self._workers)
-        self._refill_before_yield = refill_before_yield
-        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
-        self._pending: deque[tuple[AudioJob, concurrent.futures.Future]] = deque()
-
-    def __enter__(self) -> "BoundedPrefetch":
-        self._executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=self._workers, thread_name_prefix="audio-prep"
-        )
-        for _ in range(self._depth):
-            if not self._submit_one():
-                break
-        return self
-
-    def _submit_one(self) -> bool:
-        assert self._executor is not None
-        try:
-            item = next(self._items)
-        except StopIteration:
-            return False
-        self._pending.append((item, self._executor.submit(self._fn, item)))
-        return True
-
-    def __iter__(self) -> Iterator[tuple[AudioJob, concurrent.futures.Future]]:
-        while self._pending:
-            item, future = self._pending.popleft()
-            if self._refill_before_yield:
-                self._submit_one()
-            yield item, future
-            if not self._refill_before_yield:
-                self._submit_one()
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        if self._executor is not None:
-            self._executor.shutdown(wait=True, cancel_futures=exc is not None)
 
 
 class PairBudgetPrefetch:
@@ -852,6 +853,7 @@ class SileroRuntime:
     runner: Callable[[np.ndarray, Any, TranscriptionConfig], Sequence[dict[str, Any]]]
     provider: str | None = None
     provider_options: dict[str, dict[str, str]] | None = None
+    load_seconds: float = 0.0
 
 
 class SileroBackendUnavailable(RuntimeError):
@@ -902,16 +904,61 @@ def is_onnxruntime_failure(exc: BaseException) -> bool:
     return exc.__class__.__module__.startswith("onnxruntime.")
 
 
-def build_silero_jit_runtime() -> SileroRuntime:
-    from silero_vad import get_speech_timestamps, load_silero_vad
+def installed_silero_jit_path() -> Path:
+    try:
+        distribution = importlib_metadata.distribution("silero-vad")
+    except importlib_metadata.PackageNotFoundError as exc:
+        raise SileroBackendUnavailable("silero-vad is not installed") from exc
+    if distribution.version != SILERO_VERSION:
+        raise SileroBackendUnavailable(
+            f"expected silero-vad {SILERO_VERSION}, found {distribution.version}"
+        )
+    path = Path(distribution.locate_file("silero_vad/data/silero_vad.jit"))
+    if not path.is_file():
+        raise SileroBackendUnavailable(f"Silero TorchScript asset is missing: {path}")
+    return path
 
-    model = load_silero_vad(onnx=False)
+
+def build_silero_jit_runtime() -> SileroRuntime:
+    timestamps_fn = getattr(
+        importlib.import_module("transcribe_assets.vectorized_silero"),
+        "get_speech_timestamps",
+    )
+
+    class SafeTorchScriptSilero:
+        def __init__(self) -> None:
+            self.model = torch.jit.load(
+                str(installed_silero_jit_path()), map_location="cpu"
+            ).eval()
+
+        def speech_probabilities(self, audio: np.ndarray) -> np.ndarray:
+            audio = np.ascontiguousarray(audio, dtype=np.float32)
+            if audio.ndim != 1:
+                raise ValueError(
+                    f"Silero VAD expects mono audio, got shape {audio.shape}"
+                )
+            if not audio.size:
+                return np.empty(0, dtype=np.float32)
+            values = torch.from_numpy(audio).unsqueeze(0)
+            if values.shape[1] < 512:
+                values = torch.nn.functional.pad(values, (0, 512 - values.shape[1]))
+            self.model.reset_states()
+            with torch.inference_mode():
+                probabilities = self.model.audio_forward(values, SR)
+            expected_frames = (audio.size + 511) // 512
+            return (
+                probabilities.reshape(-1)[:expected_frames]
+                .to(dtype=torch.float32)
+                .numpy()
+            )
+
+    model = SafeTorchScriptSilero()
 
     def run(
         audio: np.ndarray, active_model: Any, args: TranscriptionConfig
     ) -> Sequence[dict[str, Any]]:
-        return get_speech_timestamps(
-            torch.from_numpy(audio),
+        return timestamps_fn(
+            audio,
             active_model,
             sampling_rate=SR,
             threshold=args.vad_threshold,
@@ -919,7 +966,6 @@ def build_silero_jit_runtime() -> SileroRuntime:
             max_speech_duration_s=args.max_dur,
             min_silence_duration_ms=args.min_silence_ms,
             speech_pad_ms=args.speech_pad_ms,
-            return_seconds=False,
         )
 
     return SileroRuntime(model=model, engine="jit", runner=run)
@@ -969,13 +1015,71 @@ def build_silero_onnx_runtime() -> SileroRuntime:
     )
 
 
-def get_silero_runtime(requested_engine: str) -> SileroRuntime:
+def build_silero_torch_runtime(args: TranscriptionConfig) -> SileroRuntime:
+    started = time.perf_counter()
+    try:
+        module = importlib.import_module("transcribe_assets.torch_silero")
+        limits_class = getattr(module, "BatchLimits")
+        model_class = getattr(module, "TorchSileroSequenceVAD")
+        timestamps_fn = getattr(
+            importlib.import_module("transcribe_assets.vectorized_silero"),
+            "get_speech_timestamps_from_probabilities",
+        )
+        limits = limits_class(
+            block_frames=args.vad_block_frames,
+            max_files=args.vad_batch_size,
+            max_valid_frames=args.vad_block_frames * args.vad_batch_size,
+            max_padded_frames=args.vad_block_frames * args.vad_batch_size,
+            max_audio_seconds=(args.vad_block_frames * args.vad_batch_size * 0.032),
+        )
+        model = model_class(sampling_rate=SR, limits=limits)
+    except (AttributeError, ImportError, OSError, RuntimeError, ValueError) as exc:
+        raise SileroBackendUnavailable(str(exc)) from exc
+    load_seconds = time.perf_counter() - started
+
+    def run(
+        audio: np.ndarray, active_model: Any, config: TranscriptionConfig
+    ) -> Sequence[dict[str, Any]]:
+        probabilities = active_model.speech_probabilities(audio)
+        return timestamps_fn(
+            len(audio),
+            probabilities,
+            sampling_rate=SR,
+            threshold=config.vad_threshold,
+            min_speech_duration_ms=int(round(config.min_dur * 1000)),
+            max_speech_duration_s=config.max_dur,
+            min_silence_duration_ms=config.min_silence_ms,
+            speech_pad_ms=config.speech_pad_ms,
+        )
+
+    return SileroRuntime(
+        model=model,
+        engine="torch",
+        runner=run,
+        provider="CPU",
+        load_seconds=load_seconds,
+    )
+
+
+def get_silero_runtime(
+    requested_engine: str, args: TranscriptionConfig
+) -> SileroRuntime:
     cache = getattr(_vad_thread_local, "runtimes", None)
     if cache is None:
         cache = {}
         _vad_thread_local.runtimes = cache
-    if requested_engine in cache:
-        return cache[requested_engine]
+    cache_key = (
+        requested_engine,
+        args.vad_batch_size,
+        args.vad_block_frames,
+    )
+    if cache_key in cache:
+        return cache[cache_key]
+
+    if requested_engine == "torch":
+        runtime = build_silero_torch_runtime(args)
+        cache[cache_key] = runtime
+        return runtime
 
     if requested_engine in {"auto", "onnx"}:
         try:
@@ -985,11 +1089,11 @@ def get_silero_runtime(requested_engine: str) -> SileroRuntime:
                 raise
             _vad_thread_local.onnx_fallback_error = f"{type(exc).__name__}: {exc}"
         else:
-            cache[requested_engine] = runtime
+            cache[cache_key] = runtime
             return runtime
 
     runtime = build_silero_jit_runtime()
-    cache[requested_engine] = runtime
+    cache[cache_key] = runtime
     return runtime
 
 
@@ -1016,7 +1120,7 @@ def segment_audio_silero(
     dict[str, dict[str, str]] | None,
     str | None,
 ]:
-    runtime = get_silero_runtime(args.vad_engine)
+    runtime = get_silero_runtime(args.vad_engine, args)
     fallback_reason = getattr(_vad_thread_local, "onnx_fallback_error", None)
     if (
         args.vad_engine == "auto"
@@ -1043,7 +1147,7 @@ def segment_audio_silero(
         if cache is None:
             cache = {}
             _vad_thread_local.runtimes = cache
-        cache["auto"] = runtime
+        cache[("auto", args.vad_batch_size, args.vad_block_frames)] = runtime
         timestamps = runtime.runner(audio, runtime.model, args)
 
     raw_segments = sample_timestamps_to_seconds(timestamps, len(audio))
@@ -1091,10 +1195,20 @@ def merge_speech_segments(
     return merged
 
 
-def prepare_audio(job: AudioJob, args: TranscriptionConfig) -> PreparedAudio:
+def decode_job(job: AudioJob, args: TranscriptionConfig) -> DecodedAudio:
     started = time.perf_counter()
     audio, decode_backend = decode_audio_resolved(job.path, args.audio_backend)
-    decode_seconds = time.perf_counter() - started
+    return DecodedAudio(
+        audio=audio,
+        decode_backend=decode_backend,
+        decode_seconds=time.perf_counter() - started,
+    )
+
+
+def prepare_decoded_audio(
+    decoded: DecodedAudio, args: TranscriptionConfig
+) -> PreparedAudio:
+    audio = decoded.audio
     duration = len(audio) / SR
 
     started = time.perf_counter()
@@ -1131,14 +1245,242 @@ def prepare_audio(job: AudioJob, args: TranscriptionConfig) -> PreparedAudio:
         audio=audio,
         segment_times=segment_times,
         speech_spans=speech_spans,
-        decode_seconds=decode_seconds,
+        decode_seconds=decoded.decode_seconds,
         vad_seconds=vad_seconds,
         vad_engine=engine,
-        decode_backend=decode_backend,
+        decode_backend=decoded.decode_backend,
         vad_provider=provider,
         vad_provider_options=provider_options,
         vad_fallback_reason=fallback_reason,
     )
+
+
+def prepare_audio(job: AudioJob, args: TranscriptionConfig) -> PreparedAudio:
+    return prepare_decoded_audio(decode_job(job, args), args)
+
+
+def postprocess_silero_probabilities(
+    audio: np.ndarray,
+    probabilities: np.ndarray,
+    args: TranscriptionConfig,
+) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
+    module = importlib.import_module("transcribe_assets.vectorized_silero")
+    timestamps_fn = getattr(module, "get_speech_timestamps_from_probabilities")
+    timestamps = timestamps_fn(
+        len(audio),
+        probabilities,
+        sampling_rate=SR,
+        threshold=args.vad_threshold,
+        min_speech_duration_ms=int(round(args.min_dur * 1000)),
+        max_speech_duration_s=args.max_dur,
+        min_silence_duration_ms=args.min_silence_ms,
+        speech_pad_ms=args.speech_pad_ms,
+    )
+    raw_segments = sample_timestamps_to_seconds(timestamps, len(audio))
+    segments = (
+        merge_speech_segments(raw_segments, args.max_dur)
+        if args.vad_merge
+        else list(raw_segments)
+    )
+    return (
+        validate_segment_times(segments, len(audio) / SR, max_duration=args.max_dur),
+        raw_segments,
+    )
+
+
+def prepare_torch_silero_group(
+    jobs: Sequence[AudioJob],
+    args: TranscriptionConfig,
+    decode_workers: int,
+) -> PreparedGroup:
+    """Decode a group concurrently, then run one bounded packed Torch VAD request."""
+    results = {job.index: PreparedJobResult(job=job) for job in jobs}
+    decoded: list[tuple[AudioJob, DecodedAudio]] = []
+    worker_count = min(max(1, decode_workers), len(jobs))
+
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=worker_count, thread_name_prefix="audio-decode"
+    ) as executor:
+        futures = {job.index: executor.submit(decode_job, job, args) for job in jobs}
+        # Load the stateless VAD while decoding is in flight. The local loader reads
+        # package data directly and does not alter PyTorch's global thread count.
+        effective_block = getattr(
+            _vad_thread_local, "torch_vad_retry_block", args.vad_block_frames
+        )
+        runtime_args = (
+            args
+            if effective_block == args.vad_block_frames
+            else replace(args, vad_block_frames=effective_block)
+        )
+        runtime = get_silero_runtime("torch", runtime_args)
+        model_load_seconds = runtime.load_seconds
+        runtime.load_seconds = 0.0
+        for job in jobs:
+            try:
+                decoded.append((job, futures[job.index].result()))
+            except Exception as exc:
+                results[job.index].error = exc
+
+    if not decoded:
+        return PreparedGroup(
+            results=[results[job.index] for job in jobs],
+            vad_metrics=VadBatchMetrics(model_load_seconds=model_load_seconds),
+        )
+
+    metrics = VadBatchMetrics(
+        model_load_seconds=model_load_seconds,
+        prepared_groups=1,
+        effective_block_frames=runtime.model.limits.block_frames,
+    )
+    successful: dict[int, tuple[DecodedAudio, np.ndarray, float]] = {}
+
+    def is_memory_failure(exc: Exception) -> bool:
+        message = str(exc).lower()
+        return isinstance(exc, MemoryError) or any(
+            marker in message
+            for marker in (
+                "out of memory",
+                "cannot allocate memory",
+                "defaultcpuallocator",
+            )
+        )
+
+    def infer(items: Sequence[tuple[AudioJob, DecodedAudio]]) -> None:
+        nonlocal runtime
+        retry_cap = getattr(_vad_thread_local, "torch_vad_retry_cap", None)
+        if retry_cap is not None and len(items) > retry_cap:
+            for offset in range(0, len(items), retry_cap):
+                infer(items[offset : offset + retry_cap])
+            return
+
+        started = time.perf_counter()
+        try:
+            batch_probabilities = runtime.model.speech_probabilities_batch(
+                [item.audio for _job, item in items]
+            )
+        except Exception as exc:
+            metrics.inference_seconds += time.perf_counter() - started
+            if len(items) == 1:
+                current_block = runtime.model.limits.block_frames
+                if is_memory_failure(exc) and current_block > 1:
+                    lower_block = max(1, current_block // 2)
+                    _vad_thread_local.torch_vad_retry_block = lower_block
+                    lower_args = replace(args, vad_block_frames=lower_block)
+                    runtime = get_silero_runtime("torch", lower_args)
+                    metrics.model_load_seconds += runtime.load_seconds
+                    runtime.load_seconds = 0.0
+                    metrics.effective_block_frames = lower_block
+                    info(
+                        "[warn] packed Torch VAD ran out of memory for one file; "
+                        f"retrying with {lower_block} frames per temporal block"
+                    )
+                    infer(items)
+                    return
+                results[items[0][0].index].error = exc
+                return
+            if is_memory_failure(exc):
+                current_cap = retry_cap or args.vad_batch_size
+                lower_cap = max(1, min(current_cap // 2, len(items) // 2))
+                _vad_thread_local.torch_vad_retry_cap = lower_cap
+                if not getattr(_vad_thread_local, "torch_vad_retry_reported", False):
+                    info(
+                        "[warn] packed Torch VAD ran out of memory; retrying with "
+                        f"at most {lower_cap} file(s) per pack"
+                    )
+                    _vad_thread_local.torch_vad_retry_reported = True
+                infer(items)
+                return
+            midpoint = len(items) // 2
+            infer(items[:midpoint])
+            infer(items[midpoint:])
+            return
+
+        batch_seconds = time.perf_counter() - started
+        metrics.inference_seconds += batch_seconds
+        execution = runtime.model.last_stats
+        metrics.model_calls += execution.model_calls
+        metrics.valid_frames += execution.valid_frames
+        metrics.padded_frames += execution.padded_frames
+        metrics.max_files_per_call = max(
+            metrics.max_files_per_call, execution.max_files_per_call
+        )
+        total_frames = max(1, sum(len(values) for values in batch_probabilities))
+        for (job, item), values in zip(items, batch_probabilities, strict=True):
+            successful[job.index] = (
+                item,
+                values,
+                batch_seconds * len(values) / total_frames,
+            )
+
+    infer(decoded)
+
+    for job, _item in decoded:
+        candidate = successful.get(job.index)
+        if candidate is None:
+            continue
+        item, values, inference_share = candidate
+        started = time.perf_counter()
+        try:
+            segments, raw_segments = postprocess_silero_probabilities(
+                item.audio, values, args
+            )
+        except Exception as exc:
+            metrics.postprocess_seconds += time.perf_counter() - started
+            results[job.index].error = exc
+            continue
+        item_postprocess_seconds = time.perf_counter() - started
+        metrics.postprocess_seconds += item_postprocess_seconds
+        results[job.index].prepared = PreparedAudio(
+            audio=item.audio,
+            segment_times=segments,
+            speech_spans=raw_segments,
+            decode_seconds=item.decode_seconds,
+            vad_seconds=inference_share + item_postprocess_seconds,
+            vad_engine="torch" + ("+merge" if args.vad_merge else ""),
+            decode_backend=item.decode_backend,
+            vad_provider="CPU",
+        )
+
+    return PreparedGroup(
+        results=[results[job.index] for job in jobs],
+        vad_metrics=metrics,
+    )
+
+
+def prepare_source_group(
+    jobs: Sequence[AudioJob],
+    args: TranscriptionConfig,
+    workers: int,
+) -> PreparedGroup:
+    if args.vad == "silero" and args.vad_engine == "torch":
+        try:
+            return prepare_torch_silero_group(jobs, args, workers)
+        except SileroBackendUnavailable as exc:
+            if not all(job.vad_engine_requested == "auto" for job in jobs):
+                raise
+            info(f"[warn] packed Torch Silero unavailable ({exc}); using sequence ONNX")
+            fallback_args = replace(args, vad_engine="auto")
+            fallback = prepare_source_group(jobs, fallback_args, workers)
+            reason = f"SileroBackendUnavailable: {exc}"
+            for result in fallback.results:
+                if result.prepared is not None:
+                    result.prepared.vad_fallback_reason = reason
+            return fallback
+
+    results: list[PreparedJobResult] = []
+    worker_count = min(max(1, workers), len(jobs))
+    with concurrent.futures.ThreadPoolExecutor(
+        max_workers=worker_count, thread_name_prefix="audio-prep"
+    ) as executor:
+        futures = {job.index: executor.submit(prepare_audio, job, args) for job in jobs}
+        for job in jobs:
+            try:
+                results.append(
+                    PreparedJobResult(job=job, prepared=futures[job.index].result())
+                )
+            except Exception as exc:
+                results.append(PreparedJobResult(job=job, error=exc))
+    return PreparedGroup(results=results)
 
 
 def pick_device(requested: str) -> str:
@@ -2891,6 +3233,24 @@ def generate_json(
         "timing": job.alignment_mode,
         "models": {
             "asr": {"id": MODEL_ID, "revision": ASR_MODEL_REVISION},
+            "vad": (
+                {
+                    "distribution": "silero-vad",
+                    "version": package_version("silero-vad"),
+                    "weight_asset": (
+                        "transcribe_assets/silero_vad_v6.onnx"
+                        if job.vad_engine_actual == "onnx"
+                        else "silero_vad/data/silero_vad.jit"
+                    ),
+                    "implementation": {
+                        "torch": "packed-sequence-v1",
+                        "onnx": "sequence-onnx",
+                        "jit": "packaged-torchscript",
+                    }.get(job.vad_engine_actual),
+                }
+                if job.vad_mode == "silero"
+                else None
+            ),
             "aligner": (
                 {
                     "id": ALIGN_MODEL_ID,
@@ -3145,7 +3505,10 @@ def parse_args(argv: Sequence[str] | None = None) -> TranscriptionConfig:
         "--preprocess-workers",
         type=int,
         default=None,
-        help="Concurrent decode/VAD workers; auto uses 1 for one file and at most 2 otherwise.",
+        help=(
+            "Concurrent audio decode workers; non-packed engines also run one VAD "
+            "instance per worker. Auto uses 1 for one file and at most 2 otherwise."
+        ),
     )
     parser.add_argument(
         "--pipeline-preparation",
@@ -3167,8 +3530,32 @@ def parse_args(argv: Sequence[str] | None = None) -> TranscriptionConfig:
     group.add_argument(
         "--vad-engine",
         default="auto",
-        choices=["auto", "onnx", "jit"],
-        help="Silero runtime; auto prefers faster ONNX and falls back to TorchScript.",
+        choices=["auto", "torch", "onnx", "jit"],
+        help=(
+            "Silero runtime; torch enables packed independent-file CPU batches, "
+            "auto selects packed Torch and falls back to sequence ONNX."
+        ),
+    )
+    group.add_argument(
+        "--vad-batch-size",
+        type=int,
+        default=DEFAULT_TORCH_VAD_BATCH_SIZE,
+        help="Maximum independent files per packed Torch VAD model call.",
+    )
+    group.add_argument(
+        "--vad-block-frames",
+        type=int,
+        default=DEFAULT_TORCH_VAD_BLOCK_FRAMES,
+        help="Maximum 32 ms frames per file in one packed Torch VAD model call.",
+    )
+    group.add_argument(
+        "--vad-threads",
+        type=int,
+        default=None,
+        help=(
+            "Process-wide PyTorch CPU thread count; auto preserves the platform "
+            "default. This also affects ASR CPU feature preparation."
+        ),
     )
     group.add_argument(
         "--vad-merge",
@@ -3364,6 +3751,19 @@ def validate_args(args: TranscriptionConfig) -> None:
         raise SystemExit("--audio-memory-gb must be positive")
     if args.preprocess_workers is not None and args.preprocess_workers <= 0:
         raise SystemExit("--preprocess-workers must be positive")
+    if args.vad_batch_size <= 0 or args.vad_block_frames <= 0:
+        raise SystemExit("--vad-batch-size and --vad-block-frames must be positive")
+    if args.vad_batch_size * args.vad_block_frames > MAX_TORCH_VAD_PADDED_FRAMES:
+        raise SystemExit(
+            "--vad-batch-size * --vad-block-frames must not exceed "
+            f"{MAX_TORCH_VAD_PADDED_FRAMES:,} frames"
+        )
+    if args.vad_threads is not None and args.vad_threads <= 0:
+        raise SystemExit("--vad-threads must be positive")
+    if args.vad_threads is not None and (
+        args.vad != "silero" or args.vad_engine not in {"auto", "torch"}
+    ):
+        raise SystemExit("--vad-threads applies only to packed Torch Silero VAD")
     if args.batch_size is not None and args.batch_size <= 0:
         raise SystemExit("--batch-size must be positive")
     if args.batch_max_size is not None and args.batch_max_size <= 0:
@@ -3521,16 +3921,22 @@ def preflight_runtime(args: TranscriptionConfig) -> None:
         ),
     ]
     if args.vad == "silero":
-        if args.vad_engine in {"auto", "jit"}:
-            required.append(("silero_vad", "Silero VAD", "silero-vad"))
-        if args.vad_engine == "onnx":
+        if args.vad_engine == "torch":
             required.append(
                 (
-                    "transcribe_assets.vectorized_silero",
-                    "vectorized ONNX Silero VAD",
+                    "transcribe_assets.torch_silero",
+                    "packed Torch Silero VAD",
                     "the local transcribe_assets package",
                 )
             )
+        required.append(
+            (
+                "transcribe_assets.vectorized_silero",
+                "Silero timestamp runtime",
+                "the local transcribe_assets package",
+            )
+        )
+        if args.vad_engine == "onnx":
             required.append(("onnxruntime", "ONNX Silero VAD", "onnxruntime"))
     elif args.vad == "auditok":
         required.append(("auditok.core", "Auditok VAD", "auditok"))
@@ -3554,6 +3960,15 @@ def preflight_runtime(args: TranscriptionConfig) -> None:
             raise SystemExit(
                 f"Cannot initialize {feature}: import {module_name!r} failed ({exc}).\n"
                 f"  Install a compatible build with: pip install {package}"
+            ) from exc
+
+    if args.vad == "silero" and args.vad_engine in {"torch", "jit"}:
+        try:
+            installed_silero_jit_path()
+        except SileroBackendUnavailable as exc:
+            raise SystemExit(
+                f"Silero {SILERO_VERSION} package data is unavailable ({exc}). "
+                "Install it with: pip install -r requirements.txt"
             ) from exc
 
     from packaging.version import Version
@@ -3743,9 +4158,6 @@ def transcribe_all(
         f"next-group preparation: {'on' if pipeline_enabled else 'off'}"
     )
 
-    def prepare_fn(job: AudioJob) -> PreparedAudio:
-        return prepare_audio(job, args)
-
     processor = None
     model = None
     retained_processed_jobs: list[AudioJob] = []
@@ -3766,17 +4178,40 @@ def transcribe_all(
         if device == "cuda":
             torch.cuda.reset_peak_memory_stats()
 
-    def collect_pending(pending) -> list[AudioJob]:
+    def collect_prepared(group: PreparedGroup) -> list[AudioJob]:
+        metrics = group.vad_metrics
+        stats.vad_model_load_seconds += metrics.model_load_seconds
+        stats.vad_inference_seconds += metrics.inference_seconds
+        stats.vad_postprocess_seconds += metrics.postprocess_seconds
+        stats.vad_prepared_groups += metrics.prepared_groups
+        stats.vad_model_calls += metrics.model_calls
+        stats.vad_valid_frames += metrics.valid_frames
+        stats.vad_padded_frames += metrics.padded_frames
+        stats.vad_max_files_per_call = max(
+            stats.vad_max_files_per_call, metrics.max_files_per_call
+        )
+        if metrics.effective_block_frames:
+            stats.vad_effective_block_frames = (
+                metrics.effective_block_frames
+                if stats.vad_effective_block_frames == 0
+                else min(
+                    stats.vad_effective_block_frames,
+                    metrics.effective_block_frames,
+                )
+            )
         prepared_group: list[AudioJob] = []
-        for job, future in pending:
-            try:
-                prepared = future.result()
-                attach_prepared(job, prepared, stats)
-                prepared_group.append(job)
-                del prepared
-            except Exception as exc:
-                job.error = f"audio preparation failed: {exc}"
+        for result in group.results:
+            job = result.job
+            if result.error is not None:
+                job.error = f"audio preparation failed: {result.error}"
                 info(f"[error] {job.path}: {job.error}")
+                continue
+            if result.prepared is None:
+                job.error = "audio preparation failed: no result returned"
+                info(f"[error] {job.path}: {job.error}")
+                continue
+            attach_prepared(job, result.prepared, stats)
+            prepared_group.append(job)
         return prepared_group
 
     def enforce_actual_memory_budget() -> None:
@@ -3819,58 +4254,58 @@ def transcribe_all(
             )
 
     def submit_group(executor, group: Sequence[AudioJob]):
-        return [(job, executor.submit(prepare_fn, job)) for job in group]
+        return executor.submit(prepare_source_group, group, args, workers)
+
+    def resolve_group(
+        source_group: Sequence[AudioJob], future: concurrent.futures.Future
+    ) -> list[AudioJob]:
+        started = time.perf_counter()
+        try:
+            prepared = future.result()
+        except Exception as exc:
+            prepared = PreparedGroup(
+                results=[PreparedJobResult(job=job, error=exc) for job in source_group]
+            )
+        stats.preparation_wait_seconds += time.perf_counter() - started
+        return collect_prepared(prepared)
 
     completed = False
     try:
-        if not pipeline_enabled:
-            for source_group in source_groups:
-                group_workers = min(workers, len(source_group))
-                with BoundedPrefetch(
-                    source_group, prepare_fn, workers=group_workers, depth=group_workers
-                ) as prefetch:
-                    load_model_once()
-                    prepared_group = collect_pending(prefetch)
+        executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="audio-group"
+        )
+        try:
+            pending = submit_group(executor, source_groups[0])
+            load_model_once()
+
+            for group_index, source_group in enumerate(source_groups):
+                prepared_group = resolve_group(source_group, pending)
                 enforce_actual_memory_budget()
+
+                next_pending = None
+                if pipeline_enabled and group_index + 1 < len(source_groups):
+                    resident_bytes = (
+                        sum(job.audio_bytes for job in jobs)
+                        if retain_audio
+                        else sum(job.audio_bytes for job in prepared_group)
+                    )
+                    can_overlap = (
+                        resident_bytes + planned_group_bytes[group_index + 1]
+                        <= memory_budget
+                    )
+                    if can_overlap:
+                        next_pending = submit_group(
+                            executor, source_groups[group_index + 1]
+                        )
+
                 process_prepared_group(prepared_group)
-        else:
-            executor = concurrent.futures.ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="audio-prep"
-            )
-            try:
-                pending = submit_group(executor, source_groups[0])
-                load_model_once()
 
-                for group_index, _ in enumerate(source_groups):
-                    prepared_group = collect_pending(pending)
-                    enforce_actual_memory_budget()
-
-                    next_pending = None
-                    if group_index + 1 < len(source_groups):
-                        resident_bytes = (
-                            sum(job.audio_bytes for job in jobs)
-                            if retain_audio
-                            else sum(job.audio_bytes for job in prepared_group)
-                        )
-                        can_overlap = (
-                            resident_bytes + planned_group_bytes[group_index + 1]
-                            <= memory_budget
-                        )
-                        if can_overlap:
-                            next_pending = submit_group(
-                                executor,
-                                source_groups[group_index + 1],
-                            )
-
-                    process_prepared_group(prepared_group)
-
-                    if group_index + 1 < len(source_groups):
-                        pending = next_pending or submit_group(
-                            executor,
-                            source_groups[group_index + 1],
-                        )
-            finally:
-                executor.shutdown(wait=True, cancel_futures=True)
+                if group_index + 1 < len(source_groups):
+                    pending = next_pending or submit_group(
+                        executor, source_groups[group_index + 1]
+                    )
+        finally:
+            executor.shutdown(wait=True, cancel_futures=True)
         completed = True
     finally:
         if device == "cuda" and torch.cuda.is_available():
@@ -4162,6 +4597,8 @@ def runtime_environment(device: str, dtype: torch.dtype) -> dict[str, Any]:
         },
         "torch_cuda_build": torch.version.cuda,
         "pytorch_cuda_alloc_conf": os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+        "torch_intraop_threads": torch.get_num_threads(),
+        "torch_interop_threads": torch.get_num_interop_threads(),
     }
     if device == "cuda" and torch.cuda.is_available():
         index = torch.cuda.current_device()
@@ -4220,6 +4657,17 @@ def build_profile_payload(
         "created_unix_seconds": time.time(),
         "models": {
             "asr": {"id": MODEL_ID, "revision": ASR_MODEL_REVISION},
+            "vad": (
+                {
+                    "distribution": "silero-vad",
+                    "version": package_version("silero-vad"),
+                    "torch_weight_asset": "silero_vad/data/silero_vad.jit",
+                    "onnx_weight_asset": "transcribe_assets/silero_vad_v6.onnx",
+                    "packed_torch_implementation": "packed-sequence-v1",
+                }
+                if args.vad == "silero"
+                else None
+            ),
             "aligner": (
                 {
                     "id": ALIGN_MODEL_ID,
@@ -4244,8 +4692,13 @@ def build_profile_payload(
             ),
         },
         "timings": {
+            "input_validation_seconds": stats.input_validation_seconds,
             "decode_worker_seconds": stats.decode_seconds,
             "vad_worker_seconds": stats.vad_seconds,
+            "vad_model_load_seconds": stats.vad_model_load_seconds,
+            "vad_inference_seconds": stats.vad_inference_seconds,
+            "vad_postprocess_seconds": stats.vad_postprocess_seconds,
+            "preparation_wait_seconds": stats.preparation_wait_seconds,
             "asr_load_seconds": stats.asr_load_seconds,
             "asr_wall_seconds": stats.asr_seconds,
             "asr_feature_worker_seconds": stats.asr_feature_seconds,
@@ -4256,6 +4709,40 @@ def build_profile_payload(
             "aligner_load_seconds": stats.align_load_seconds,
             "emissions_seconds": stats.emissions_seconds,
             "viterbi_seconds": stats.viterbi_seconds,
+            "post_asr_seconds": stats.post_asr_seconds,
+        },
+        "vad": {
+            "requested_engines": sorted(
+                {
+                    job.vad_engine_requested
+                    for job in jobs
+                    if job.vad_engine_requested is not None
+                }
+            ),
+            "actual_engines": sorted(
+                {
+                    job.vad_engine_actual
+                    for job in jobs
+                    if job.vad_engine_actual is not None
+                }
+            ),
+            "torch_device": "cpu" if stats.vad_prepared_groups else None,
+            "torch_intraop_threads": (
+                torch.get_num_threads() if stats.vad_prepared_groups else None
+            ),
+            "configured_file_batch_size": args.vad_batch_size,
+            "configured_block_frames": args.vad_block_frames,
+            "effective_block_frames": stats.vad_effective_block_frames or None,
+            "prepared_groups": stats.vad_prepared_groups,
+            "model_calls": stats.vad_model_calls,
+            "valid_frames": stats.vad_valid_frames,
+            "padded_frames": stats.vad_padded_frames,
+            "padding_ratio": (
+                0.0
+                if stats.vad_padded_frames == 0
+                else 1.0 - stats.vad_valid_frames / stats.vad_padded_frames
+            ),
+            "max_files_per_call": stats.vad_max_files_per_call,
         },
         "asr": {
             "batches": stats.asr_batches,
@@ -4357,6 +4844,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     profile_path = validate_profile_output_path(args.profile_json, jobs)
     preflight_runtime(args)
+    input_validation_seconds = time.perf_counter() - started
+
+    if args.vad == "silero" and args.vad_engine == "auto":
+        args.vad_engine = "torch"
+        info("Silero auto selected packed CPU Torch from the batch benchmark")
+
+    if args.vad_threads is not None:
+        torch.set_num_threads(args.vad_threads)
 
     device = pick_device(args.device)
     # Store the resolved device so worker-side pinning does not treat --device auto
@@ -4390,6 +4885,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     align_dtype = torch.float16 if args.align_dtype == "fp16" else torch.float32
 
     stats = RunStats()
+    stats.input_validation_seconds = input_validation_seconds
     if device == "cuda":
         free_bytes, total_bytes = torch.cuda.mem_get_info()
         stats.cuda_total_gib = total_bytes / 1024**3
@@ -4415,7 +4911,14 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     total_hint = sum(job.duration_hint or 0.0 for job in jobs)
     vad_label = {
-        "silero": (f"Silero {args.vad_engine}{' + merge' if args.vad_merge else ''}"),
+        "silero": (
+            f"Silero {args.vad_engine}{' + merge' if args.vad_merge else ''}"
+            + (
+                f" (files {args.vad_batch_size}, block {args.vad_block_frames})"
+                if args.vad_engine == "torch"
+                else ""
+            )
+        ),
         "auditok": "auditok",
         "none": f"no VAD ({args.max_dur:g}s fixed windows)",
     }[args.vad]
@@ -4432,9 +4935,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     segment_count = sum(len(job.segment_times) for job in jobs if job.error is None)
     print(
         f"{INDENT}ASR done: {segment_count} segments in {fmt_dur(stats.asr_seconds)} "
-        f"(decode {fmt_dur(stats.decode_seconds)}, VAD {fmt_dur(stats.vad_seconds)} worker-time)",
+        f"(decode {fmt_dur(stats.decode_seconds)}, VAD {fmt_dur(stats.vad_seconds)} compute)",
         flush=True,
     )
+    post_asr_started = time.perf_counter()
     if args.alignment == "word":
         print("\n[3/4] Forced alignment + transactional outputs", flush=True)
         align_and_write_all(jobs, args, device, align_dtype, stats)
@@ -4444,6 +4948,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     else:
         print("\n[3/4] Text-only transactional outputs", flush=True)
         write_text_only_outputs(jobs)
+    stats.post_asr_seconds = time.perf_counter() - post_asr_started
 
     if device == "cuda":
         free_bytes, _total_bytes = torch.cuda.mem_get_info()
@@ -4481,6 +4986,26 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"decode text {stats.asr_decode_seconds:.3f}s",
         flush=True,
     )
+    print(
+        f"{INDENT}input/probe {stats.input_validation_seconds:.3f}s | "
+        f"exposed preparation wait {stats.preparation_wait_seconds:.3f}s | "
+        f"post-ASR stage {stats.post_asr_seconds:.3f}s",
+        flush=True,
+    )
+    if stats.vad_prepared_groups:
+        vad_padding = (
+            0.0
+            if stats.vad_padded_frames == 0
+            else 1.0 - stats.vad_valid_frames / stats.vad_padded_frames
+        )
+        print(
+            f"{INDENT}packed VAD {stats.vad_inference_seconds:.3f}s inference + "
+            f"{stats.vad_postprocess_seconds:.3f}s timestamps | "
+            f"{stats.vad_prepared_groups} group(s), {stats.vad_model_calls} model call(s), "
+            f"max {stats.vad_max_files_per_call} files/call, "
+            f"padding {vad_padding:.1%}",
+            flush=True,
+        )
     print(
         f"{INDENT}aligner load {fmt_dur(stats.align_load_seconds)} | "
         f"emissions {fmt_dur(stats.emissions_seconds)} | "

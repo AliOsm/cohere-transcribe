@@ -18,8 +18,8 @@ numpy
 soundfile
 librosa>=0.10.2.post1
 
-# Default Silero VAD. The bundled ONNX model and runtime are used first; the
-# silero-vad package provides the production fallback.
+# Silero VAD. Packed CPU Torch uses the pinned package weights by default for
+# batch jobs; the bundled sequence ONNX model remains the automatic fallback.
 silero-vad==6.2.1
 onnxruntime>=1.16.1
 

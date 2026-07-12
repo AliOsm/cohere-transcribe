@@ -12,13 +12,13 @@ This guide installs the production snapshot of `transcribe.py` on a new machine.
 | Apple MPS | Implemented but not benchmarked in this project | FP16, batch 4-8 |
 | AMD ROCm | Uses PyTorch's CUDA-compatible API, but unvalidated | start conservatively |
 
-The final 69m21s test file completed in 36.49 seconds median with Silero merge, approximate segment timestamps, and static batch 24 on the RTX 3060. The fastest measured text-only/no-VAD run was 31.30 seconds, but fixed windows can split words and include silence; it is not the reliability default.
+The final 69m21s single-file test completed in 36.49 seconds median with Silero merge, approximate segment timestamps, and static ASR batch 24 on the RTX 3060. The fastest measured text-only/no-VAD run was 31.30 seconds, but fixed windows can split words and include silence; it is not the reliability default. The later 500-file validation is documented under batch inference below.
 
 Expect roughly 5.3 GB of model downloads for ASR plus word alignment. Keep at least 12 GB of free disk space for model cache, package wheels, and temporary files. CPU inference of this 2B model needs substantial system memory; 16 GB or more is recommended.
 
 ## 1. Copy the complete directory
 
-Keep `transcribe.py` and `transcribe_assets/` together. The local Silero ONNX runtime is imported relative to the script directory.
+Keep `transcribe.py` and `transcribe_assets/` together. Packed Torch inference, the timestamp state machine, and the sequence ONNX fallback are imported from that local package.
 
 ## 2. Install system prerequisites
 
@@ -102,7 +102,7 @@ pip install -r requirements-optional.txt
 ```
 
 - TorchCodec is installed with the official aligner dependency and enables `--audio-backend torchcodec`; `auto` can still fall back to librosa or FFmpeg when decoding fails.
-- Auditok enables `--vad auditok`; Silero is the production default. Auditok may require PortAudio development packages because of its optional PyAudio dependency.
+- Auditok enables `--vad auditok`; packed CPU Torch Silero is the production default and requires no dependency beyond the pinned package and PyTorch already installed above. Auditok may require PortAudio development packages because of its optional PyAudio dependency.
 
 ## 5. Accept and authenticate for the Cohere model
 
@@ -143,7 +143,7 @@ After both models are cached, `HF_HUB_OFFLINE=1` prevents network checks.
 
 ## 6. Validate before loading model weights
 
-The validator checks hashes, imports, the CLI, the bundled ONNX VAD, the exact official aligner Git provenance, Uroman, matching Torch/TorchAudio versions, and TorchAudio's forced-align operation. It does not load the 2B model.
+The validator checks hashes, imports, the CLI, packed Torch and bundled ONNX VAD execution, cross-backend probability parity, the exact official aligner Git provenance, Uroman, matching Torch/TorchAudio versions, and TorchAudio's forced-align operation. It does not load the 2B model.
 
 ```bash
 python validate_install.py
@@ -224,7 +224,11 @@ python transcribe.py a.wav b.mp3 recordings/ \
   --profile-json batch.profile.json
 ```
 
-Directory traversal, bounded decode/VAD workers, next-group preparation, and cross-file ASR batching are enabled automatically. The output directory preserves relative input paths. `--existing skip` resumes complete output sets and rebuilds partial sets.
+Directory traversal, concurrent decoding, packed independent-file VAD, next-group preparation, and cross-file ASR batching are enabled automatically. Each recording retains independent Silero hidden state and waveform context. The output directory preserves relative input paths. `--existing skip` resumes complete output sets and rebuilds partial sets.
+
+The production VAD defaults are `--vad-engine auto --vad-batch-size 16 --vad-block-frames 512`. On the balanced 500-file corpus totaling 5,035.7 seconds, packed Torch inference took 1.68 seconds in isolation versus 5.94 seconds for sequence ONNX and preserved all 500 final timestamp lists. Five reversed-order full ASR runs produced a 38.37-second Torch median versus 38.59 seconds for ONNX; decode/ASR overlap intentionally hides most of the 4.89-second VAD compute reduction.
+
+Use `--vad-engine onnx` for an explicit fallback comparison or `--vad-engine jit` for the direct packaged TorchScript fallback. Explicit engines fail explicitly. `auto` selects packed Torch and falls back to sequence ONNX only when initialization is unavailable.
 
 English uses the same model:
 
@@ -244,7 +248,7 @@ input.vtt
 
 Add `--formats txt srt vtt json` for a provenance-rich JSON result. Plain-text mode writes only `.txt`. Outputs are written transactionally and source changes during processing are rejected before publication.
 
-Profile JSON records exact stage times, package/device versions, resolved audio and VAD backends, segment statistics, generated tokens, batch/OOM history, and CUDA allocated/reserved peaks.
+Profile JSON records exact input/probe, exposed preparation, VAD model/inference/postprocessing, ASR, and post-ASR timings; package/device versions; requested and actual VAD backends; packed valid/padded frames; generated tokens; batch/OOM history; and CUDA allocated/reserved peaks.
 
 ## Tuning without destabilizing the machine
 
@@ -255,6 +259,9 @@ Profile JSON records exact stage times, package/device versions, resolved audio 
 - If alignment runs out of memory, lower `--align-batch-size` from 4 to 2 or 1. The script also halves it automatically after an OOM.
 - Bound decoded host audio with `--audio-memory-gb`; this is a group target, so one very large decoded file can still exceed it.
 - Leave `--adaptive-batch` and `--pin-memory` off unless profiling a different platform. Both were throughput ties on the RTX 3060.
+- Keep packed VAD at `--vad-batch-size 16 --vad-block-frames 512` for the measured production pipeline. A standalone all-at-once 500-file kernel favored 256 frames by 7.5%, but the actual four-group preparation pipeline was about 5% faster at 512 frames and the mixed 69-minute-plus-500-file workload also favored longer blocks slightly; the production measurement takes precedence.
+- `--vad-threads` changes PyTorch's process-wide CPU thread count and also affects ASR feature preparation. The platform default was six threads on the validated Ryzen 5 5600X and was the measured optimum; do not increase it without paired end-to-end measurements.
+- The script rejects packed configurations above 32,768 padded frames per call, persistently lowers file-pack and temporal-block limits after CPU OOM, and isolates other failures recursively so one malformed or memory-heavy recording does not fail its companions.
 
 ## Troubleshooting
 
@@ -290,7 +297,7 @@ This replaces any package installed from the unrelated PyPI project with the mai
 
 ### ONNX Runtime DRM warning
 
-A warning about `/sys/class/drm/card0/device/vendor` does not mean VAD failed. The bundled Silero session explicitly uses `CPUExecutionProvider`; the profile records the actual provider. Run the validator's ONNX smoke test if uncertain.
+A warning about `/sys/class/drm/card0/device/vendor` does not mean VAD failed. The fallback Silero session explicitly uses `CPUExecutionProvider`; the profile records the actual provider. Run the validator's ONNX smoke test if uncertain.
 
 ### Unsupported audio container
 

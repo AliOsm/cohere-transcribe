@@ -19,11 +19,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 SCRIPT = ROOT / "transcribe.py"
 ASSET = ROOT / "transcribe_assets" / "silero_vad_v6.onnx"
+TORCH_RUNTIME = ROOT / "transcribe_assets" / "torch_silero.py"
+TIMESTAMP_RUNTIME = ROOT / "transcribe_assets" / "vectorized_silero.py"
 EXPECTED_SCRIPT_SHA256 = (
-    "fe781182519f9afa2e60b76afc5f82409fd6a98b799989109f3a38f696f4bd54"
+    "bddba05fc41002ab93ffe94daa86afbb0b46e08697df4cac778ae1150db0ab11"
 )
 EXPECTED_ASSET_SHA256 = (
     "914fd98ac0a73d69ba1e70c9b1d66acb740eff90500dfde08b89a961b168a6a9"
+)
+EXPECTED_TORCH_RUNTIME_SHA256 = (
+    "f95eee3b804a10a5294e76571ffa1fec990f612b19b2691391704a429344647d"
+)
+EXPECTED_TIMESTAMP_RUNTIME_SHA256 = (
+    "19109b495481d08373c80a7334d0abfcd166f71015f3ead469d468819cee9fa6"
 )
 ASR_MODEL_ID = "CohereLabs/cohere-transcribe-arabic-07-2026"
 ASR_REVISION = "0a8193caa4f3f92131471ab08824e488141cb392"
@@ -166,7 +174,7 @@ def validate_files(results: Results) -> None:
         if digest == EXPECTED_SCRIPT_SHA256:
             results.ok(f"script integrity: {digest}")
         else:
-            results.warn(
+            results.fail(
                 "script differs from the production snapshot: "
                 f"expected {EXPECTED_SCRIPT_SHA256}, found {digest}"
             )
@@ -181,6 +189,30 @@ def validate_files(results: Results) -> None:
             results.fail(
                 f"Silero asset checksum mismatch: expected {EXPECTED_ASSET_SHA256}, "
                 f"found {digest}"
+            )
+
+    if not TORCH_RUNTIME.is_file():
+        results.fail(f"missing packed Torch Silero runtime: {TORCH_RUNTIME}")
+    else:
+        digest = sha256(TORCH_RUNTIME)
+        if digest == EXPECTED_TORCH_RUNTIME_SHA256:
+            results.ok(f"packed Torch Silero runtime integrity: {digest}")
+        else:
+            results.fail(
+                "packed Torch Silero runtime checksum mismatch: "
+                f"expected {EXPECTED_TORCH_RUNTIME_SHA256}, found {digest}"
+            )
+
+    if not TIMESTAMP_RUNTIME.is_file():
+        results.fail(f"missing Silero timestamp runtime: {TIMESTAMP_RUNTIME}")
+    else:
+        digest = sha256(TIMESTAMP_RUNTIME)
+        if digest == EXPECTED_TIMESTAMP_RUNTIME_SHA256:
+            results.ok(f"Silero timestamp runtime integrity: {digest}")
+        else:
+            results.fail(
+                "Silero timestamp runtime checksum mismatch: "
+                f"expected {EXPECTED_TIMESTAMP_RUNTIME_SHA256}, found {digest}"
             )
 
     completed = subprocess.run(
@@ -244,26 +276,77 @@ def validate_common_runtime(results: Results):
     return torch
 
 
-def validate_silero(results: Results) -> None:
-    import_required(results, "silero_vad", "Silero TorchScript fallback")
+def validate_silero(results: Results, torch) -> None:
+    silero_version = distribution_version("silero-vad")
+    if silero_version != "6.2.1":
+        results.fail(
+            f"Silero VAD version: expected 6.2.1, found {silero_version or 'missing'}"
+        )
+    else:
+        results.ok("Silero VAD package data: 6.2.1")
     import_required(results, "onnxruntime", "vectorized Silero runtime")
     try:
         import numpy as np
 
         sys.path.insert(0, str(ROOT))
-        from transcribe_assets.vectorized_silero import VectorizedSileroVAD
-
-        probabilities = VectorizedSileroVAD().speech_probabilities(
-            np.zeros(1024, dtype=np.float32)
+        from transcribe_assets.torch_silero import BatchLimits, TorchSileroSequenceVAD
+        from transcribe_assets.vectorized_silero import (
+            VectorizedSileroVAD,
+            get_speech_timestamps_from_probabilities,
         )
-        if probabilities.shape != (2,) or not all(
-            math.isfinite(float(value)) for value in probabilities
+
+        audios = [
+            np.zeros(1024, dtype=np.float32),
+            np.linspace(-0.02, 0.02, 1537, dtype=np.float32),
+        ]
+        onnx_model = VectorizedSileroVAD()
+        onnx_probabilities = [
+            onnx_model.speech_probabilities(audio) for audio in audios
+        ]
+        if torch is None:
+            raise RuntimeError("PyTorch is unavailable")
+        before_threads = torch.get_num_threads()
+        torch_model = TorchSileroSequenceVAD(
+            limits=BatchLimits(
+                block_frames=16,
+                max_files=2,
+                max_valid_frames=32,
+                max_padded_frames=32,
+                max_audio_seconds=1.024,
+            )
+        )
+        torch_probabilities = torch_model.speech_probabilities_batch(audios)
+        after_threads = torch.get_num_threads()
+        if before_threads != after_threads:
+            raise RuntimeError(
+                f"packed Torch loader changed thread count {before_threads} -> {after_threads}"
+            )
+        for audio, candidate, reference in zip(
+            audios, torch_probabilities, onnx_probabilities, strict=True
         ):
-            raise RuntimeError(f"unexpected probability output {probabilities!r}")
+            if candidate.shape != reference.shape or not all(
+                math.isfinite(float(value)) for value in candidate
+            ):
+                raise RuntimeError(
+                    f"unexpected packed probability output {candidate!r}"
+                )
+            difference = float(np.max(np.abs(candidate - reference), initial=0.0))
+            if difference > 2e-6:
+                raise RuntimeError(
+                    f"packed Torch/ONNX probability difference {difference:.3g} exceeds 2e-6"
+                )
+            torch_timestamps = get_speech_timestamps_from_probabilities(
+                len(audio), candidate
+            )
+            onnx_timestamps = get_speech_timestamps_from_probabilities(
+                len(audio), reference
+            )
+            if torch_timestamps != onnx_timestamps:
+                raise RuntimeError("packed Torch/ONNX timestamp smoke mismatch")
     except Exception as exc:
-        results.fail(f"bundled Silero ONNX smoke test: {type(exc).__name__}: {exc}")
+        results.fail(f"Silero runtime smoke test: {type(exc).__name__}: {exc}")
     else:
-        results.ok("bundled Silero ONNX model executes on CPU")
+        results.ok("packed Torch and bundled ONNX Silero agree and execute on CPU")
 
 
 def validate_word_alignment(results: Results, torch) -> None:
@@ -413,7 +496,7 @@ def main() -> int:
     results = Results()
     validate_files(results)
     torch = validate_common_runtime(results)
-    validate_silero(results)
+    validate_silero(results, torch)
     if args.mode == "word":
         validate_word_alignment(results, torch)
     report_optional_runtime(results)

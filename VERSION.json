@@ -1,10 +1,10 @@
 {
-  "bundle_version": "2026.07.12-official-aligner",
-  "created_at": "2026-07-12",
+  "bundle_version": "2026.07.13-packed-silero",
+  "created_at": "2026-07-13",
   "entry_point": "transcribe.py",
-  "script_sha256": "fe781182519f9afa2e60b76afc5f82409fd6a98b799989109f3a38f696f4bd54",
+  "script_sha256": "bddba05fc41002ab93ffe94daa86afbb0b46e08697df4cac778ae1150db0ab11",
   "output_schema_version": 4,
-  "profile_schema_version": 3,
+  "profile_schema_version": 4,
   "python_validated": "3.12.12",
   "torch_validated": "2.11.0+cu128",
   "torchaudio_validated": "2.11.0+cu128",
@@ -102,6 +102,78 @@
       "current_asr_text_sha256": "11e07d260a45355f0b618dfbd0a3c6d81ae8b0074f1a767bdb153e2f82632dd6"
     }
   },
-  "silero_onnx_sha256": "914fd98ac0a73d69ba1e70c9b1d66acb740eff90500dfde08b89a961b168a6a9",
-  "notes": "Model weights are downloaded from Hugging Face on first use and are not included in this bundle. Word-alignment transcript identity was validated against frozen ASR output, so ASR WER is unchanged by the runtime migration."
+  "silero_vad": {
+    "distribution": "silero-vad",
+    "version": "6.2.1",
+    "packed_torch_runtime_sha256": "f95eee3b804a10a5294e76571ffa1fec990f612b19b2691391704a429344647d",
+    "shared_timestamp_runtime_sha256": "19109b495481d08373c80a7334d0abfcd166f71015f3ead469d468819cee9fa6",
+    "sequence_onnx_sha256": "914fd98ac0a73d69ba1e70c9b1d66acb740eff90500dfde08b89a961b168a6a9",
+    "default": {
+      "engine": "auto selects packed CPU Torch",
+      "file_batch_size": 16,
+      "block_frames": 512,
+      "maximum_configured_padded_frames": 32768,
+      "fallback": "sequence ONNX, then side-effect-free packaged TorchScript"
+    },
+    "batch_validation": {
+      "evaluated_at": "2026-07-13",
+      "hardware": "AMD Ryzen 5 5600X and NVIDIA GeForce RTX 3060 12 GB",
+      "balanced_500": {
+        "files": 500,
+        "audio_seconds": 5035.7145,
+        "datasets": [
+          "Casablanca",
+          "Common Voice 18 Arabic",
+          "FLEURS ar_eg",
+          "Quran ayah CA sample",
+          "SADA22"
+        ],
+        "exact_timestamp_lists": "500/500",
+        "maximum_probability_difference": 0.0000273,
+        "isolated_vad_seconds": {
+          "packed_torch_batch16_block512": 1.6757,
+          "sequence_onnx_single_thread": 5.9377
+        },
+        "five_run_full_asr_medians_seconds": {
+          "packed_torch": 38.369,
+          "sequence_onnx": 38.592,
+          "paired_torch_advantage": 0.208
+        },
+        "five_run_external_wall_medians_seconds": {
+          "packed_torch": 40.11,
+          "sequence_onnx": 40.33
+        },
+        "five_run_user_cpu_medians_seconds": {
+          "packed_torch": 66.17,
+          "sequence_onnx": 70.09
+        },
+        "five_run_peak_rss_medians_mib": {
+          "packed_torch": 5104.13,
+          "sequence_onnx": 5080.90
+        },
+        "full_asr_vad_worker_medians_seconds": {
+          "packed_torch": 2.262,
+          "sequence_onnx": 7.153
+        },
+        "full_asr_exposed_preparation_wait_medians_seconds": {
+          "packed_torch": 0.046,
+          "sequence_onnx": 0.440
+        },
+        "repeated_transcript_byte_identity": "2500/2500 files across five paired runs"
+      },
+      "longform_1wav": {
+        "audio_seconds": 4160.6791875,
+        "exact_timestamp_lists": "1/1",
+        "speech_spans": 378
+      },
+      "mixed_501": {
+        "files": 501,
+        "audio_seconds": 9196.3936875,
+        "block256_median_seconds": 4.8228,
+        "block512_median_seconds": 4.8052,
+        "block1024_median_seconds": 4.7574
+      }
+    }
+  },
+  "notes": "Model weights are downloaded from Hugging Face on first use and are not included in this bundle. Word-alignment transcript identity was validated against frozen ASR output, so ASR WER is unchanged by the runtime migration. Packed Torch and sequence ONNX produced identical retained VAD timestamps and downstream transcripts; most VAD compute savings overlap GPU ASR in large folder runs."
 }
