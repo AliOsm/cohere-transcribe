@@ -1,0 +1,31 @@
+# Runtime dependencies for transcribe.py.
+#
+# Install a matched torch + torchaudio pair for the target device FIRST. See
+# SETUP.md. They are intentionally omitted here because their wheel source is
+# platform- and accelerator-specific.
+
+# Cohere ASR model and processor. This narrow range is intentional: the script
+# patches CohereAsr internals and was validated against Transformers 5.13.0.
+transformers>=5.13,<5.14
+huggingface_hub>=1.5,<2
+accelerate>=1.1
+sentencepiece>=0.1.91,!=0.1.92
+protobuf
+packaging>=20
+
+# Audio decoding, resampling, and numeric processing.
+numpy
+soundfile
+librosa>=0.10.2.post1
+
+# Default Silero VAD. The bundled ONNX model and runtime are used first; the
+# silero-vad package provides the production fallback.
+silero-vad==6.2.1
+onnxruntime>=1.16.1
+
+# Default word-level alignment. `unidecode` is required by the aligner's Arabic
+# romanization path but is not declared by all ctc-forced-aligner releases.
+ctc-forced-aligner==1.0.2
+unidecode
+
+tqdm>=4.60

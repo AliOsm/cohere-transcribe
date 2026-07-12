@@ -1,0 +1,22 @@
+{
+  "bundle_version": "2026.07.12-production",
+  "created_at": "2026-07-12",
+  "entry_point": "transcribe.py",
+  "script_sha256": "e27add42e280781e0a98efa1e032a2675fcd9feb459d5e8a2e736e01e1d34e78",
+  "python_validated": "3.12.12",
+  "torch_validated": "2.11.0+cu128",
+  "torchaudio_validated": "2.11.0+cu128",
+  "transformers_validated": "5.13.0",
+  "cuda_runtime_validated": "12.8",
+  "gpu_validated": "NVIDIA GeForce RTX 3060 12 GB",
+  "asr_model": {
+    "id": "CohereLabs/cohere-transcribe-arabic-07-2026",
+    "revision": "0a8193caa4f3f92131471ab08824e488141cb392"
+  },
+  "alignment_model": {
+    "id": "MahmoudAshraf/mms-300m-1130-forced-aligner",
+    "revision": "49402e9577b1158620820667c218cd494cc44486"
+  },
+  "silero_onnx_sha256": "914fd98ac0a73d69ba1e70c9b1d66acb740eff90500dfde08b89a961b168a6a9",
+  "notes": "Model weights are downloaded from Hugging Face on first use and are not included in this bundle."
+}
