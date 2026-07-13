@@ -4,9 +4,9 @@
 # SETUP.md. They are intentionally omitted here because their wheel source is
 # platform- and accelerator-specific.
 
-# Cohere ASR model and processor. This narrow range is intentional: the script
+# Cohere ASR model and processor. This exact pin is intentional: the script
 # patches CohereAsr internals and was validated against Transformers 5.13.0.
-transformers>=5.13,<5.14
+transformers==5.13.0
 huggingface_hub>=1.5,<2
 accelerate>=1.1
 sentencepiece>=0.1.91,!=0.1.92

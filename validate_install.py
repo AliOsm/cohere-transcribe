@@ -22,13 +22,13 @@ ASSET = ROOT / "transcribe_assets" / "silero_vad_v6.onnx"
 TORCH_RUNTIME = ROOT / "transcribe_assets" / "torch_silero.py"
 TIMESTAMP_RUNTIME = ROOT / "transcribe_assets" / "vectorized_silero.py"
 EXPECTED_SCRIPT_SHA256 = (
-    "bddba05fc41002ab93ffe94daa86afbb0b46e08697df4cac778ae1150db0ab11"
+    "f31aac815ae15c82328d25cc45b98711aa63779d74e669b9427541289b17b04a"
 )
 EXPECTED_ASSET_SHA256 = (
     "914fd98ac0a73d69ba1e70c9b1d66acb740eff90500dfde08b89a961b168a6a9"
 )
 EXPECTED_TORCH_RUNTIME_SHA256 = (
-    "f95eee3b804a10a5294e76571ffa1fec990f612b19b2691391704a429344647d"
+    "91f3877a018b4523b8549348c9992bb5661ca8d80c093ccaf206919ffc69a156"
 )
 EXPECTED_TIMESTAMP_RUNTIME_SHA256 = (
     "19109b495481d08373c80a7334d0abfcd166f71015f3ead469d468819cee9fa6"
@@ -252,11 +252,11 @@ def validate_common_runtime(results: Results):
     if version is not None:
         from packaging.version import Version
 
-        if Version("5.13") <= Version(version) < Version("5.14"):
-            results.ok(f"Transformers compatibility range: {version}")
+        if Version(version) == Version("5.13.0"):
+            results.ok(f"Transformers exact compatibility: {version}")
         else:
             results.fail(
-                f"Transformers {version} is outside the validated >=5.13,<5.14 range"
+                f"Transformers {version} does not match the validated 5.13.0 release"
             )
 
     if torch is None:
@@ -306,6 +306,16 @@ def validate_silero(results: Results, torch) -> None:
         if torch is None:
             raise RuntimeError("PyTorch is unavailable")
         before_threads = torch.get_num_threads()
+        custom_limits = BatchLimits(
+            block_frames=2001,
+            max_files=1,
+            max_valid_frames=2001,
+            max_padded_frames=2001,
+            max_audio_seconds=None,
+        )
+        custom_limits.validate()
+        if custom_limits.effective_valid_frames() != 2001:
+            raise RuntimeError("integer packed-VAD frame limit was rounded")
         torch_model = TorchSileroSequenceVAD(
             limits=BatchLimits(
                 block_frames=16,

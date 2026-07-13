@@ -1,10 +1,10 @@
 {
-  "bundle_version": "2026.07.13-packed-silero",
+  "bundle_version": "2026.07.13-script-review",
   "created_at": "2026-07-13",
   "entry_point": "transcribe.py",
-  "script_sha256": "bddba05fc41002ab93ffe94daa86afbb0b46e08697df4cac778ae1150db0ab11",
-  "output_schema_version": 4,
-  "profile_schema_version": 4,
+  "script_sha256": "f31aac815ae15c82328d25cc45b98711aa63779d74e669b9427541289b17b04a",
+  "output_schema_version": 5,
+  "profile_schema_version": 5,
   "python_validated": "3.12.12",
   "torch_validated": "2.11.0+cu128",
   "torchaudio_validated": "2.11.0+cu128",
@@ -20,10 +20,16 @@
     "revision": "49402e9577b1158620820667c218cd494cc44486"
   },
   "alignment_runtime": {
+    "role": "Uroman normalization, span construction, and timestamp postprocessing utilities",
     "distribution": "ctc-forced-aligner",
     "version": "0.3.0",
     "repository": "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git",
     "revision": "c344f5bc900323aa434a7cb200b7c629d463bd02",
+    "kernel": {
+      "distribution": "torchaudio",
+      "operation": "torchaudio.functional.forced_align",
+      "version_validated": "2.11.0+cu128"
+    },
     "romanizer": {
       "distribution": "uroman",
       "version": "1.3.1.1"
@@ -105,7 +111,7 @@
   "silero_vad": {
     "distribution": "silero-vad",
     "version": "6.2.1",
-    "packed_torch_runtime_sha256": "f95eee3b804a10a5294e76571ffa1fec990f612b19b2691391704a429344647d",
+    "packed_torch_runtime_sha256": "91f3877a018b4523b8549348c9992bb5661ca8d80c093ccaf206919ffc69a156",
     "shared_timestamp_runtime_sha256": "19109b495481d08373c80a7334d0abfcd166f71015f3ead469d468819cee9fa6",
     "sequence_onnx_sha256": "914fd98ac0a73d69ba1e70c9b1d66acb740eff90500dfde08b89a961b168a6a9",
     "default": {
@@ -175,5 +181,25 @@
       }
     }
   },
-  "notes": "Model weights are downloaded from Hugging Face on first use and are not included in this bundle. Word-alignment transcript identity was validated against frozen ASR output, so ASR WER is unchanged by the runtime migration. Packed Torch and sequence ONNX produced identical retained VAD timestamps and downstream transcripts; most VAD compute savings overlap GPU ASR in large folder runs."
+  "script_review": {
+    "evaluated_at": "2026-07-13",
+    "correctness_fixes": [
+      "Preserve original segment_index values in JSON when empty ASR segments are omitted.",
+      "Avoid floating-point frame loss for legal packed Torch VAD limits.",
+      "Jump directly to a nearby decoder retry ceiling instead of repeating 890 and 896-token passes.",
+      "Treat unsupported directory fsync and descriptor chmod operations portably."
+    ],
+    "telemetry_fixes": [
+      "Separate requested and resolved configurations.",
+      "Distinguish generation-call wall, CUDA device generation, H2D, and token analysis.",
+      "Account for discarded prefetched features separately from generation rows.",
+      "Record exact local runtime hashes and the TorchAudio forced-alignment kernel."
+    ],
+    "retained_alternatives": [
+      "Auditok and fixed-window segmentation remain explicit measured tradeoff modes.",
+      "Sequence ONNX and packaged TorchScript remain automatic and explicit Silero fallbacks.",
+      "Adaptive batching and pinned memory remain opt-in for unvalidated devices."
+    ]
+  },
+  "notes": "Model weights are downloaded from Hugging Face on first use and are not included in this bundle. Word-alignment transcript identity was validated against frozen ASR output, so ASR WER is unchanged by the runtime migration. Packed Torch and sequence ONNX produced identical retained VAD timestamps and downstream transcripts; most VAD compute savings overlap GPU ASR in large folder runs. The exact Transformers 5.13.0 pin protects internal Cohere projection and attention-mask optimizations from unvalidated patch-release changes."
 }

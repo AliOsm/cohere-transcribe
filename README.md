@@ -4,7 +4,7 @@ This directory is the self-contained production runtime for `transcribe.py`. It 
 
 The model weights are not redistributed here. The script downloads pinned revisions from Hugging Face on first use after you accept the Cohere model's access terms.
 
-Word alignment uses the maintained `MahmoudAshraf97/ctc-forced-aligner` implementation pinned to an exact Git commit and its Uroman Arabic normalization path; `pip install -r requirements.txt` fetches and builds it automatically.
+Word alignment uses `torchaudio.functional.forced_align` as the CTC kernel and the maintained `MahmoudAshraf97/ctc-forced-aligner` utilities for Uroman normalization, span construction, and timestamp postprocessing. The utility package is pinned to an exact Git commit and installed automatically by `pip install -r requirements.txt`.
 
 Silero `auto` uses bounded packed CPU Torch inference so independent recordings share encoder work while retaining separate recurrent state. Sequence ONNX and a side-effect-free TorchScript loader remain available as fallbacks or explicit comparison engines.
 

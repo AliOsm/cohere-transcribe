@@ -12,7 +12,9 @@ import argparse
 import concurrent.futures
 import contextlib
 import errno
+import functools
 import gc
+import hashlib
 import importlib
 import io
 import json
@@ -53,8 +55,9 @@ ASR_MODEL_REVISION = "0a8193caa4f3f92131471ab08824e488141cb392"
 ALIGN_MODEL_REVISION = "49402e9577b1158620820667c218cd494cc44486"
 ALIGN_PACKAGE_REPOSITORY = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git"
 ALIGN_PACKAGE_REVISION = "c344f5bc900323aa434a7cb200b7c629d463bd02"
-OUTPUT_SCHEMA_VERSION = 4
-PROFILE_SCHEMA_VERSION = 4
+BUNDLE_VERSION = "2026.07.13-script-review"
+OUTPUT_SCHEMA_VERSION = 5
+PROFILE_SCHEMA_VERSION = 5
 SR = 16_000
 ALIGN_WINDOW_S = 30
 ALIGN_CONTEXT_S = 2
@@ -63,9 +66,8 @@ ALIGN_CONTEXT_S = 2
 # path above 30 s, but a 30-35 s clip still remains one processor row.
 ASR_FIXED_MIN_S = 1.0
 # The projection/mask hot-path patches below depend on Transformers internals.
-# Keep the accepted range narrow and widen it only after parity tests pass.
-MIN_TRANSFORMERS_VERSION = "5.13.0"
-MAX_TRANSFORMERS_VERSION = "5.14.0"
+# Admit only the exact release used by the parity and throughput validation.
+TRANSFORMERS_VERSION = "5.13.0"
 SILERO_VERSION = "6.2.1"
 PIPELINE_GROUP_MAX_BYTES = 512 * 1024**2
 PIPELINE_GROUP_MAX_JOBS = 128
@@ -123,6 +125,35 @@ def fmt_dur(seconds: float) -> str:
 
 def info(message: str) -> None:
     tqdm.write(f"{INDENT}{message}")
+
+
+def file_sha256(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+@functools.lru_cache(maxsize=1)
+def runtime_implementation() -> dict[str, Any]:
+    """Identify the exact local code and model asset that produced an output."""
+    root = Path(__file__).resolve().parent
+    asset_root = root / "transcribe_assets"
+    artifacts = {
+        "transcribe.py": root / "transcribe.py",
+        "transcribe_assets/torch_silero.py": asset_root / "torch_silero.py",
+        "transcribe_assets/vectorized_silero.py": asset_root / "vectorized_silero.py",
+        "transcribe_assets/silero_vad_v6.onnx": asset_root / "silero_vad_v6.onnx",
+    }
+    return {
+        "bundle_version": BUNDLE_VERSION,
+        "artifacts_sha256": {
+            name: file_sha256(path) for name, path in artifacts.items()
+        },
+    }
 
 
 # Domain and configuration
@@ -263,7 +294,9 @@ class RunStats:
     asr_feature_seconds: float = 0.0
     asr_feature_wait_seconds: float = 0.0
     asr_h2d_seconds: float = 0.0
-    asr_generate_seconds: float = 0.0
+    asr_generation_call_seconds: float = 0.0
+    asr_generate_device_seconds: float = 0.0
+    asr_generation_analysis_seconds: float = 0.0
     asr_decode_seconds: float = 0.0
     align_load_seconds: float = 0.0
     emissions_seconds: float = 0.0
@@ -279,6 +312,10 @@ class RunStats:
     asr_generated_tokens: int = 0
     asr_valid_feature_frames: int = 0
     asr_padded_feature_frames: int = 0
+    asr_discarded_feature_seconds: float = 0.0
+    asr_discarded_processor_rows: int = 0
+    asr_discarded_valid_feature_frames: int = 0
+    asr_discarded_padded_feature_frames: int = 0
     asr_oom_retries: int = 0
     asr_truncation_retries: int = 0
     asr_discarded_feature_batches: int = 0
@@ -746,8 +783,11 @@ def decode_audio_resolved(path: Path, backend: str) -> tuple[np.ndarray, str]:
     audio = np.asarray(audio, dtype=np.float32)
     if audio.ndim != 1:
         raise ValueError(f"Expected mono audio after decoding, got shape {audio.shape}")
-    if not np.isfinite(audio).all():
-        raise ValueError("Decoded audio contains NaN or infinite samples")
+    # Bound the validation temporary for multi-hour recordings. Packed Silero
+    # repeats this check because its public runtime also accepts external arrays.
+    for start in range(0, audio.size, 1_048_576):
+        if not np.isfinite(audio[start : start + 1_048_576]).all():
+            raise ValueError("Decoded audio contains NaN or infinite samples")
     return np.ascontiguousarray(audio), resolved_backend
 
 
@@ -857,7 +897,7 @@ class SileroRuntime:
 
 
 class SileroBackendUnavailable(RuntimeError):
-    """An optional ONNX backend failed for an environmental reason."""
+    """A Silero execution backend is unavailable in the current environment."""
 
 
 _vad_thread_local = threading.local()
@@ -1030,7 +1070,10 @@ def build_silero_torch_runtime(args: TranscriptionConfig) -> SileroRuntime:
             max_files=args.vad_batch_size,
             max_valid_frames=args.vad_block_frames * args.vad_batch_size,
             max_padded_frames=args.vad_block_frames * args.vad_batch_size,
-            max_audio_seconds=(args.vad_block_frames * args.vad_batch_size * 0.032),
+            # max_valid_frames is already the exact integer work bound. Avoid a
+            # frames -> float seconds -> frames round-trip, which can round legal
+            # configurations such as 2,001 frames down to 2,000.
+            max_audio_seconds=None,
         )
         model = model_class(sampling_rate=SR, limits=limits)
     except (AttributeError, ImportError, OSError, RuntimeError, ValueError) as exc:
@@ -1464,7 +1507,10 @@ def prepare_source_group(
             reason = f"SileroBackendUnavailable: {exc}"
             for result in fallback.results:
                 if result.prepared is not None:
-                    result.prepared.vad_fallback_reason = reason
+                    nested_reason = result.prepared.vad_fallback_reason
+                    result.prepared.vad_fallback_reason = (
+                        f"{reason}; {nested_reason}" if nested_reason else reason
+                    )
             return fallback
 
     results: list[PreparedJobResult] = []
@@ -1673,7 +1719,9 @@ class ASRGenerationResult:
     repetition_ref_indices: set[int]
     max_new_tokens: int
     prompt_length: int
-    elapsed_seconds: float
+    call_wall_seconds: float
+    device_generate_seconds: float
+    analysis_seconds: float
     h2d_seconds: float = 0.0
     baseline_reserved_bytes: int = 0
     peak_allocated_bytes: int = 0
@@ -2063,10 +2111,12 @@ def generate_asr_batch(
     if is_cuda:
         torch.cuda.reset_peak_memory_stats(model.device)
         baseline_reserved = int(torch.cuda.memory_reserved(model.device))
-    started = time.perf_counter()
+    call_started = time.perf_counter()
 
     h2d_start = torch.cuda.Event(enable_timing=True) if is_cuda else None
     h2d_end = torch.cuda.Event(enable_timing=True) if is_cuda else None
+    generate_start = torch.cuda.Event(enable_timing=True) if is_cuda else None
+    generate_end = torch.cuda.Event(enable_timing=True) if is_cuda else None
     if h2d_start is not None:
         h2d_start.record()
 
@@ -2095,20 +2145,32 @@ def generate_asr_batch(
     )
     prompt_length = int(model_inputs["decoder_input_ids"].shape[1])
     clear_encoder_projection_cache(model)
+    generate_wall_started = time.perf_counter()
     try:
+        if generate_start is not None:
+            generate_start.record()
         with torch.inference_mode():
             generated_device = model.generate(
                 **model_inputs,
                 max_new_tokens=max_new_tokens,
                 stopping_criteria=stopping_criteria,
             )
+        if generate_end is not None:
+            generate_end.record()
         # Moving the generated ids to host is the synchronization point, so
         # separate cuda.synchronize() calls would only add launch overhead.
         generated = generated_device.detach().cpu()
         del generated_device
     finally:
         clear_encoder_projection_cache(model)
+    call_wall_seconds = time.perf_counter() - call_started
+    device_generate_seconds = (
+        float(generate_start.elapsed_time(generate_end)) / 1000.0
+        if generate_start is not None and generate_end is not None
+        else time.perf_counter() - generate_wall_started
+    )
 
+    analysis_started = time.perf_counter()
     repetition_rows = (
         stopping_criteria[0].triggered_rows if stopping_criteria else set()
     )
@@ -2121,6 +2183,7 @@ def generate_asr_batch(
         repetition_rows=repetition_rows,
         chunk_index=prepared.chunk_index,
     )
+    analysis_seconds = time.perf_counter() - analysis_started
     peak_allocated = (
         int(torch.cuda.max_memory_allocated(model.device)) if is_cuda else 0
     )
@@ -2137,7 +2200,9 @@ def generate_asr_batch(
         repetition_ref_indices=repetition_refs,
         max_new_tokens=max_new_tokens,
         prompt_length=prompt_length,
-        elapsed_seconds=time.perf_counter() - started,
+        call_wall_seconds=call_wall_seconds,
+        device_generate_seconds=device_generate_seconds,
+        analysis_seconds=analysis_seconds,
         h2d_seconds=h2d_seconds,
         baseline_reserved_bytes=baseline_reserved,
         peak_allocated_bytes=peak_allocated,
@@ -2159,12 +2224,21 @@ def decode_asr_batch(
     )
 
 
-def record_prepared_batch(stats: RunStats, prepared: PreparedASRBatch) -> None:
+def record_prepared_batch(
+    stats: RunStats, prepared: PreparedASRBatch, *, discarded: bool = False
+) -> None:
     stats.asr_feature_seconds += prepared.prepare_seconds
+    stats.pin_memory_fallbacks += prepared.pin_memory_fallbacks
+    if discarded:
+        stats.asr_discarded_feature_batches += 1
+        stats.asr_discarded_feature_seconds += prepared.prepare_seconds
+        stats.asr_discarded_processor_rows += len(prepared.chunk_index)
+        stats.asr_discarded_valid_feature_frames += prepared.valid_feature_frames
+        stats.asr_discarded_padded_feature_frames += prepared.padded_feature_frames
+        return
     stats.asr_processor_rows += len(prepared.chunk_index)
     stats.asr_valid_feature_frames += prepared.valid_feature_frames
     stats.asr_padded_feature_frames += prepared.padded_feature_frames
-    stats.pin_memory_fallbacks += prepared.pin_memory_fallbacks
 
 
 def record_generation_batch(
@@ -2173,7 +2247,9 @@ def record_generation_batch(
     result: ASRGenerationResult,
 ) -> None:
     stats.asr_batches += 1
-    stats.asr_generate_seconds += result.elapsed_seconds
+    stats.asr_generation_call_seconds += result.call_wall_seconds
+    stats.asr_generate_device_seconds += result.device_generate_seconds
+    stats.asr_generation_analysis_seconds += result.analysis_seconds
     stats.asr_h2d_seconds += result.h2d_seconds
     stats.asr_generated_tokens += sum(result.row_token_counts)
     stats.peak_cuda_gib = max(
@@ -2196,7 +2272,9 @@ def record_generation_batch(
             "generated_tokens_by_row": list(result.row_token_counts),
             "prepare_seconds": prepared.prepare_seconds,
             "h2d_seconds": result.h2d_seconds,
-            "generate_seconds": result.elapsed_seconds,
+            "generation_call_wall_seconds": result.call_wall_seconds,
+            "generate_device_seconds": result.device_generate_seconds,
+            "generation_analysis_seconds": result.analysis_seconds,
             "padded_audio_seconds": (
                 len(prepared.refs)
                 * max((ref.duration for ref in prepared.refs), default=0.0)
@@ -2255,7 +2333,10 @@ def retry_token_limit(
     )
     positional_cap = max(1, max_positions - prompt_length)
     ceiling = min(requested_maximum, positional_cap)
-    return min(ceiling, max(current_limit + 128, current_limit * 2))
+    proposed = min(ceiling, max(current_limit + 128, current_limit * 2))
+    # A tiny final increment would repeat nearly the complete autoregressive
+    # decode. Jump directly to the ceiling when fewer than 128 tokens remain.
+    return ceiling if ceiling - proposed < 128 else proposed
 
 
 def finish_asr_batch(
@@ -2347,6 +2428,24 @@ def balanced_oom_split(refs: Sequence[SegmentRef]) -> int:
     return best_index
 
 
+def classify_asr_failure(exc: Exception) -> str:
+    """Separate invariant implementation failures from data-local failures."""
+    if isinstance(
+        exc,
+        (
+            AssertionError,
+            AttributeError,
+            ImportError,
+            IndexError,
+            KeyError,
+            NotImplementedError,
+            TypeError,
+        ),
+    ):
+        return "fatal"
+    return "error"
+
+
 def handle_asr_batch_failure(
     processor,
     model,
@@ -2384,6 +2483,10 @@ def handle_asr_batch_failure(
         empty_device_cache(model.device.type)
     else:
         learn_base_batch_cap = False
+
+    if failure_kind == "fatal":
+        mark_asr_jobs_failed(refs, message, bar)
+        return
 
     if len(refs) > 1:
         midpoint = balanced_oom_split(refs) if failure_kind == "oom" else len(refs) // 2
@@ -2453,7 +2556,7 @@ def transcribe_ref_batch(
         failure_kind = "oom"
         failure_message = "device out of memory on a single segment"
     except Exception as exc:
-        failure_kind = "error"
+        failure_kind = classify_asr_failure(exc)
         failure_message = f"{type(exc).__name__}: {exc}"
     finally:
         result = None
@@ -2532,24 +2635,33 @@ def transcribe_group(
 
                 prepared: PreparedASRBatch | None = None
                 preparation_error = ""
+                preparation_kind = ""
                 wait_started = time.perf_counter()
                 try:
                     assert current_future is not None
                     prepared = current_future.result()
-                    record_prepared_batch(stats, prepared)
                 except Exception as exc:
+                    preparation_kind = classify_asr_failure(exc)
                     preparation_error = f"{type(exc).__name__}: {exc}"
                 finally:
                     stats.asr_feature_wait_seconds += time.perf_counter() - wait_started
 
-                if skipped and active_refs:
-                    try:
-                        prepared = prepare_asr_batch(processor, active_refs, args)
-                        record_prepared_batch(stats, prepared)
-                        preparation_error = ""
-                    except Exception as exc:
+                if skipped:
+                    if prepared is not None:
+                        record_prepared_batch(stats, prepared, discarded=True)
                         prepared = None
-                        preparation_error = f"{type(exc).__name__}: {exc}"
+                    if active_refs:
+                        try:
+                            prepared = prepare_asr_batch(processor, active_refs, args)
+                            record_prepared_batch(stats, prepared)
+                            preparation_error = ""
+                            preparation_kind = ""
+                        except Exception as exc:
+                            prepared = None
+                            preparation_kind = classify_asr_failure(exc)
+                            preparation_error = f"{type(exc).__name__}: {exc}"
+                elif prepared is not None:
+                    record_prepared_batch(stats, prepared)
 
                 next_refs = controller.take(pending)
                 next_future = (
@@ -2572,7 +2684,7 @@ def transcribe_group(
                         generation_kind = "oom"
                         generation_failure = "device out of memory on a single segment"
                     except Exception as exc:
-                        generation_kind = "error"
+                        generation_kind = classify_asr_failure(exc)
                         generation_failure = f"{type(exc).__name__}: {exc}"
 
                 # Keep tokenizer use serialized with processor feature preparation.
@@ -2596,7 +2708,7 @@ def transcribe_group(
                             bar,
                             stats,
                             controller,
-                            "error",
+                            preparation_kind,
                             preparation_error,
                             args.max_new_tokens,
                         )
@@ -2635,7 +2747,7 @@ def transcribe_group(
                                 bar,
                                 stats,
                                 controller,
-                                "error",
+                                classify_asr_failure(exc),
                                 f"{type(exc).__name__}: {exc}",
                                 args.max_new_tokens,
                             )
@@ -2653,8 +2765,7 @@ def transcribe_group(
                         except Exception:
                             discarded = None
                         if discarded is not None:
-                            record_prepared_batch(stats, discarded)
-                            stats.asr_discarded_feature_batches += 1
+                            record_prepared_batch(stats, discarded, discarded=True)
                             discarded = None
                     pending.extendleft(reversed(next_refs))
                     next_refs = controller.take(pending)
@@ -2722,7 +2833,7 @@ def build_alignment_window_batch(
     window_samples: int,
     context_samples: int,
 ) -> np.ndarray:
-    """Build the same zero-padded windows as ctc_forced_aligner, one batch at a time."""
+    """Build the evaluated zero-padded 34-second contextual alignment windows."""
     input_samples = window_samples + 2 * context_samples
     batch: np.ndarray = np.zeros((len(window_indices), input_samples), dtype=np.float32)
     audio_samples = len(audio)
@@ -3203,12 +3314,20 @@ def generate_json(
     transcript_lines: Sequence[str],
 ) -> str:
     segments = [
-        {"start": start, "end": end, "text": text.strip()}
-        for (start, end), text in zip(job.segment_times, job.segment_texts, strict=True)
+        {
+            "segment_index": segment_index,
+            "start": start,
+            "end": end,
+            "text": text.strip(),
+        }
+        for segment_index, ((start, end), text) in enumerate(
+            zip(job.segment_times, job.segment_texts, strict=True)
+        )
         if text.strip()
     ]
     payload = {
         "schema_version": OUTPUT_SCHEMA_VERSION,
+        "implementation": runtime_implementation(),
         "source": {
             "path": os.fspath(job.path),
             "duration_seconds": job.duration,
@@ -3255,8 +3374,16 @@ def generate_json(
                 {
                     "id": ALIGN_MODEL_ID,
                     "revision": ALIGN_MODEL_REVISION,
-                    "package_repository": ALIGN_PACKAGE_REPOSITORY,
-                    "package_revision": ALIGN_PACKAGE_REVISION,
+                    "kernel": {
+                        "distribution": "torchaudio",
+                        "operation": "torchaudio.functional.forced_align",
+                        "version": package_version("torchaudio"),
+                    },
+                    "utility_package": {
+                        "distribution": "ctc-forced-aligner",
+                        "repository": ALIGN_PACKAGE_REPOSITORY,
+                        "revision": ALIGN_PACKAGE_REVISION,
+                    },
                     "romanizer": "uroman",
                 }
                 if job.alignment_mode == "word"
@@ -3283,16 +3410,38 @@ def generate_json(
 OUTPUT_GENERATORS = {"srt": generate_srt, "vtt": generate_vtt}
 
 
+def apply_file_mode(descriptor: int, path: Path, mode: int) -> None:
+    """Apply output permissions through the portable API available."""
+    fchmod = getattr(os, "fchmod", None)
+    if callable(fchmod):
+        fchmod(descriptor, mode)
+    else:
+        os.chmod(path, mode)
+
+
 def fsync_directories(directories: Iterator[Path]) -> None:
     """Persist directory entries where the platform supports directory fsync."""
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    unsupported = {
+        errno.EACCES,
+        errno.EBADF,
+        errno.EINVAL,
+        errno.EISDIR,
+        errno.ENOTSUP,
+        errno.EPERM,
+    }
     for directory in dict.fromkeys(path.resolve() for path in directories):
-        descriptor = os.open(directory, flags)
+        try:
+            descriptor = os.open(directory, flags)
+        except OSError as exc:
+            if exc.errno in unsupported:
+                continue
+            raise
         try:
             try:
                 os.fsync(descriptor)
             except OSError as exc:
-                if exc.errno not in {errno.EBADF, errno.EINVAL, errno.ENOTSUP}:
+                if exc.errno not in unsupported:
                     raise
         finally:
             os.close(descriptor)
@@ -3341,7 +3490,7 @@ def atomic_write_outputs(
                     else:
                         handle.write(OUTPUT_GENERATORS[output_format](cues))
                     handle.flush()
-                    os.fchmod(handle.fileno(), output_mode)
+                    apply_file_mode(handle.fileno(), temporary_path, output_mode)
                     os.fsync(handle.fileno())
             except BaseException:
                 with contextlib.suppress(OSError):
@@ -3713,13 +3862,13 @@ def parse_args(argv: Sequence[str] | None = None) -> TranscriptionConfig:
         "--max-chars",
         type=int,
         default=80,
-        help="Maximum subtitle cue length in characters.",
+        help="Target subtitle cue length; a single indivisible word may exceed it.",
     )
     group.add_argument(
         "--max-cue-dur",
         type=float,
         default=6.0,
-        help="Maximum subtitle cue duration in seconds.",
+        help="Target cue duration; one word interval is never split.",
     )
     group.add_argument(
         "--max-gap",
@@ -3751,13 +3900,15 @@ def validate_args(args: TranscriptionConfig) -> None:
         raise SystemExit("--audio-memory-gb must be positive")
     if args.preprocess_workers is not None and args.preprocess_workers <= 0:
         raise SystemExit("--preprocess-workers must be positive")
-    if args.vad_batch_size <= 0 or args.vad_block_frames <= 0:
-        raise SystemExit("--vad-batch-size and --vad-block-frames must be positive")
-    if args.vad_batch_size * args.vad_block_frames > MAX_TORCH_VAD_PADDED_FRAMES:
-        raise SystemExit(
-            "--vad-batch-size * --vad-block-frames must not exceed "
-            f"{MAX_TORCH_VAD_PADDED_FRAMES:,} frames"
-        )
+    packed_vad = args.vad == "silero" and args.vad_engine in {"auto", "torch"}
+    if packed_vad:
+        if args.vad_batch_size <= 0 or args.vad_block_frames <= 0:
+            raise SystemExit("--vad-batch-size and --vad-block-frames must be positive")
+        if args.vad_batch_size * args.vad_block_frames > MAX_TORCH_VAD_PADDED_FRAMES:
+            raise SystemExit(
+                "--vad-batch-size * --vad-block-frames must not exceed "
+                f"{MAX_TORCH_VAD_PADDED_FRAMES:,} frames"
+            )
     if args.vad_threads is not None and args.vad_threads <= 0:
         raise SystemExit("--vad-threads must be positive")
     if args.vad_threads is not None and (
@@ -3785,36 +3936,33 @@ def validate_args(args: TranscriptionConfig) -> None:
         or not 0.50 <= args.batch_vram_target <= 0.98
     ):
         raise SystemExit("--batch-vram-target must be between 0.50 and 0.98")
-    if args.align_batch_size <= 0:
+    if args.alignment == "word" and args.align_batch_size <= 0:
         raise SystemExit("--align-batch-size must be positive")
-    if (
-        not math.isfinite(args.min_dur)
-        or not math.isfinite(args.max_dur)
-        or args.min_dur < 0
-        or args.max_dur <= 0
-        or args.min_dur > args.max_dur
-    ):
+    if not math.isfinite(args.max_dur) or args.max_dur <= 0:
+        raise SystemExit("--max-dur must be finite and positive")
+    if not math.isfinite(args.min_dur):
+        raise SystemExit("--min-dur must be finite")
+    if args.vad != "none" and (args.min_dur < 0 or args.min_dur > args.max_dur):
         raise SystemExit("Require 0 <= --min-dur <= --max-dur")
     if args.vad == "none" and args.max_dur < ASR_FIXED_MIN_S:
         raise SystemExit(
             f"--vad none requires --max-dur >= {ASR_FIXED_MIN_S:g} second to bound "
             "segment count and memory use"
         )
-    if not math.isfinite(args.vad_threshold) or not 0 <= args.vad_threshold <= 1:
-        raise SystemExit("--vad-threshold must be between 0 and 1")
-    if args.min_silence_ms < 0 or args.speech_pad_ms < 0:
-        raise SystemExit("--min-silence-ms and --speech-pad-ms must be non-negative")
-    if (
-        not math.isfinite(args.max_silence)
-        or not math.isfinite(args.energy_threshold)
-        or args.max_silence < 0
-        or args.energy_threshold < 0
-    ):
-        raise SystemExit(
-            "Auditok silence and energy thresholds must be finite and non-negative"
-        )
-    if args.vad == "auditok" and args.min_dur <= 0:
-        raise SystemExit("--vad auditok requires --min-dur > 0")
+    if args.vad == "silero":
+        if not 0 <= args.vad_threshold <= 1:
+            raise SystemExit("--vad-threshold must be between 0 and 1")
+        if args.min_silence_ms < 0 or args.speech_pad_ms < 0:
+            raise SystemExit(
+                "--min-silence-ms and --speech-pad-ms must be non-negative"
+            )
+    elif args.vad == "auditok":
+        if args.max_silence < 0 or args.energy_threshold < 0:
+            raise SystemExit(
+                "Auditok silence and energy thresholds must be finite and non-negative"
+            )
+        if args.min_dur <= 0:
+            raise SystemExit("--vad auditok requires --min-dur > 0")
     if getattr(args, "vad_merge", False) and args.vad != "silero":
         raise SystemExit("--vad-merge is supported only with --vad silero")
     if args.vad == "auditok" and args.max_silence >= args.max_dur:
@@ -3823,7 +3971,18 @@ def validate_args(args: TranscriptionConfig) -> None:
         raise SystemExit("--max-new-tokens must be positive")
     if args.max_retry_tokens < args.max_new_tokens:
         raise SystemExit("--max-retry-tokens must be at least --max-new-tokens")
-    if (
+    if not all(
+        math.isfinite(value)
+        for value in (
+            args.vad_threshold,
+            args.max_silence,
+            args.energy_threshold,
+            args.max_cue_dur,
+            args.max_gap,
+        )
+    ):
+        raise SystemExit("All numeric thresholds and cue limits must be finite")
+    if args.alignment != "none" and (
         args.max_chars <= 0
         or not math.isfinite(args.max_cue_dur)
         or not math.isfinite(args.max_gap)
@@ -3917,7 +4076,7 @@ def preflight_runtime(args: TranscriptionConfig) -> None:
         (
             "transformers",
             "Cohere ASR",
-            f"transformers>={MIN_TRANSFORMERS_VERSION},<{MAX_TRANSFORMERS_VERSION}",
+            f"transformers=={TRANSFORMERS_VERSION}",
         ),
     ]
     if args.vad == "silero":
@@ -3974,14 +4133,12 @@ def preflight_runtime(args: TranscriptionConfig) -> None:
     from packaging.version import Version
 
     transformers_version = package_version("transformers")
-    if (
-        transformers_version is None
-        or Version(transformers_version) < Version(MIN_TRANSFORMERS_VERSION)
-        or Version(transformers_version) >= Version(MAX_TRANSFORMERS_VERSION)
+    if transformers_version is None or Version(transformers_version) != Version(
+        TRANSFORMERS_VERSION
     ):
         raise SystemExit(
             "The optimized Cohere hot path is validated only with "
-            f"transformers>={MIN_TRANSFORMERS_VERSION},<{MAX_TRANSFORMERS_VERSION}; "
+            f"transformers=={TRANSFORMERS_VERSION}; "
             f"found {transformers_version or 'unknown'}"
         )
 
@@ -4624,6 +4781,7 @@ def runtime_environment(device: str, dtype: torch.dtype) -> dict[str, Any]:
 
 def build_profile_payload(
     args: TranscriptionConfig,
+    requested_configuration: dict[str, Any],
     stats: RunStats,
     jobs: Sequence[AudioJob],
     elapsed: float,
@@ -4655,6 +4813,7 @@ def build_profile_payload(
     return {
         "schema_version": PROFILE_SCHEMA_VERSION,
         "created_unix_seconds": time.time(),
+        "implementation": runtime_implementation(),
         "models": {
             "asr": {"id": MODEL_ID, "revision": ASR_MODEL_REVISION},
             "vad": (
@@ -4672,8 +4831,16 @@ def build_profile_payload(
                 {
                     "id": ALIGN_MODEL_ID,
                     "revision": ALIGN_MODEL_REVISION,
-                    "package_repository": ALIGN_PACKAGE_REPOSITORY,
-                    "package_revision": ALIGN_PACKAGE_REVISION,
+                    "kernel": {
+                        "distribution": "torchaudio",
+                        "operation": "torchaudio.functional.forced_align",
+                        "version": package_version("torchaudio"),
+                    },
+                    "utility_package": {
+                        "distribution": "ctc-forced-aligner",
+                        "repository": ALIGN_PACKAGE_REPOSITORY,
+                        "revision": ALIGN_PACKAGE_REVISION,
+                    },
                     "romanizer": "uroman",
                 }
                 if args.alignment == "word"
@@ -4681,7 +4848,8 @@ def build_profile_payload(
             ),
         },
         "environment": runtime_environment(device, dtype),
-        "configuration": asdict(args),
+        "configuration": requested_configuration,
+        "resolved_configuration": asdict(args),
         "run": {
             "elapsed_seconds": elapsed,
             "successful_files": len(successful),
@@ -4702,9 +4870,12 @@ def build_profile_payload(
             "asr_load_seconds": stats.asr_load_seconds,
             "asr_wall_seconds": stats.asr_seconds,
             "asr_feature_worker_seconds": stats.asr_feature_seconds,
+            "asr_discarded_feature_seconds": stats.asr_discarded_feature_seconds,
             "asr_feature_wait_seconds": stats.asr_feature_wait_seconds,
             "asr_h2d_seconds": stats.asr_h2d_seconds,
-            "asr_generate_seconds": stats.asr_generate_seconds,
+            "asr_generation_call_wall_seconds": stats.asr_generation_call_seconds,
+            "asr_generate_device_seconds": stats.asr_generate_device_seconds,
+            "asr_generation_analysis_seconds": stats.asr_generation_analysis_seconds,
             "asr_decode_seconds": stats.asr_decode_seconds,
             "aligner_load_seconds": stats.align_load_seconds,
             "emissions_seconds": stats.emissions_seconds,
@@ -4750,6 +4921,9 @@ def build_profile_payload(
             "generated_tokens": stats.asr_generated_tokens,
             "valid_feature_frames": stats.asr_valid_feature_frames,
             "padded_feature_frames": stats.asr_padded_feature_frames,
+            "discarded_processor_rows": stats.asr_discarded_processor_rows,
+            "discarded_valid_feature_frames": stats.asr_discarded_valid_feature_frames,
+            "discarded_padded_feature_frames": stats.asr_discarded_padded_feature_frames,
             "padding_ratio": padding_ratio,
             "effective_batch_min": stats.effective_batch_min,
             "effective_batch_max": stats.effective_batch_max,
@@ -4809,7 +4983,7 @@ def write_profile_json(path: Path, payload: dict[str, Any]) -> None:
         output_mode = (
             stat.S_IMODE(path.stat().st_mode) if path.exists() else DEFAULT_OUTPUT_MODE
         )
-        os.fchmod(descriptor, output_mode)
+        apply_file_mode(descriptor, temporary_path, output_mode)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(
                 payload,
@@ -4835,6 +5009,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
     validate_args(args)
     assert args.formats is not None
+    requested_configuration = asdict(args)
     started = time.perf_counter()
 
     print("\n[1/4] Validating inputs and outputs", flush=True)
@@ -4982,7 +5157,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"feature worker {stats.asr_feature_seconds:.3f}s | "
         f"feature wait {stats.asr_feature_wait_seconds:.3f}s | "
         f"H2D {stats.asr_h2d_seconds:.3f}s | "
-        f"generate {stats.asr_generate_seconds:.3f}s | "
+        f"generation call {stats.asr_generation_call_seconds:.3f}s "
+        f"(includes transfer; device {stats.asr_generate_device_seconds:.3f}s) | "
+        f"token analysis {stats.asr_generation_analysis_seconds:.3f}s | "
         f"decode text {stats.asr_decode_seconds:.3f}s",
         flush=True,
     )
@@ -5077,7 +5254,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     profile_error: str | None = None
     if profile_path is not None:
         try:
-            payload = build_profile_payload(args, stats, jobs, elapsed, device, dtype)
+            payload = build_profile_payload(
+                args,
+                requested_configuration,
+                stats,
+                jobs,
+                elapsed,
+                device,
+                dtype,
+            )
             write_profile_json(profile_path, payload)
             print(f"{INDENT}{profile_path}", flush=True)
         except Exception as exc:
@@ -5113,7 +5298,11 @@ def cli() -> int:
     try:
         return main()
     except KeyboardInterrupt:
-        print(f"\n{INDENT}Interrupted; temporary outputs were rolled back.", flush=True)
+        print(
+            f"\n{INDENT}Interrupted; the active output commit was rolled back. "
+            "Files completed earlier remain published.",
+            flush=True,
+        )
         return 130
 
 

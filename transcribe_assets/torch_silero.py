@@ -13,6 +13,7 @@ other Silero runtimes.
 from __future__ import annotations
 
 import importlib.metadata
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -38,7 +39,7 @@ class BatchLimits:
     """Memory and work limits for a packed inference call.
 
     One Silero frame represents 32 ms at either supported sample rate. Both the
-    frame and duration limits apply; the smaller effective limit wins.
+    frame and optional duration limits apply; the smaller effective limit wins.
     ``max_padded_frames`` bounds the dense tensor created before packing.
     """
 
@@ -46,10 +47,12 @@ class BatchLimits:
     max_files: int = 16
     max_valid_frames: int = 8_192
     max_padded_frames: int = 8_192
-    max_audio_seconds: float = 300.0
+    max_audio_seconds: float | None = 300.0
 
     def effective_valid_frames(self) -> int:
-        duration_frames = int(self.max_audio_seconds / 0.032)
+        if self.max_audio_seconds is None:
+            return self.max_valid_frames
+        duration_frames = math.floor(self.max_audio_seconds * 1_000 / 32 + 1e-9)
         return min(self.max_valid_frames, duration_frames)
 
     def validate(self) -> None:
@@ -62,8 +65,10 @@ class BatchLimits:
         for name, value in integer_values.items():
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        if not np.isfinite(self.max_audio_seconds) or self.max_audio_seconds <= 0:
-            raise ValueError("max_audio_seconds must be finite and positive")
+        if self.max_audio_seconds is not None and (
+            not np.isfinite(self.max_audio_seconds) or self.max_audio_seconds <= 0
+        ):
+            raise ValueError("max_audio_seconds must be finite and positive or None")
         effective_frames = self.effective_valid_frames()
         if effective_frames < 1:
             raise ValueError("max_audio_seconds is shorter than one Silero frame")

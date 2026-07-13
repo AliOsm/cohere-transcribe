@@ -87,7 +87,7 @@ PY
 
 ## 4. Install the runtime
 
-For the supported version range:
+For the exact evaluated runtime:
 
 ```bash
 pip install -r requirements.txt
@@ -175,7 +175,7 @@ python transcribe.py input.wav \
 
 ### Word-level CTC timestamps
 
-This loads the 300M MMS aligner after freeing the ASR model:
+This loads the 300M MMS aligner after freeing the ASR model. TorchAudio provides the forced-alignment kernel; the pinned `ctc-forced-aligner` package provides Uroman normalization, span construction, and timestamp postprocessing:
 
 ```bash
 python transcribe.py input.wav \
@@ -248,7 +248,9 @@ input.vtt
 
 Add `--formats txt srt vtt json` for a provenance-rich JSON result. Plain-text mode writes only `.txt`. Outputs are written transactionally and source changes during processing are rejected before publication.
 
-Profile JSON records exact input/probe, exposed preparation, VAD model/inference/postprocessing, ASR, and post-ASR timings; package/device versions; requested and actual VAD backends; packed valid/padded frames; generated tokens; batch/OOM history; and CUDA allocated/reserved peaks.
+JSON segment records carry their original `segment_index`, so words and token-limit provenance remain referentially correct when a VAD segment produces empty text. `--max-chars` and `--max-cue-dur` are cue-building targets between words; the script never splits one indivisible ASR token merely to satisfy either target.
+
+Profile JSON records exact input/probe, exposed preparation, VAD model/inference/postprocessing, ASR, and post-ASR timings; package/device versions; requested and resolved configurations; requested and actual VAD backends; packed valid/padded frames; generated tokens; discarded feature work; batch/OOM history; CUDA allocated/reserved peaks; and hashes for the executing script and local VAD artifacts. Generation call wall time includes input transfer, while the CUDA device-generation metric uses stream events and is reported separately.
 
 ## Tuning without destabilizing the machine
 
@@ -261,7 +263,7 @@ Profile JSON records exact input/probe, exposed preparation, VAD model/inference
 - Leave `--adaptive-batch` and `--pin-memory` off unless profiling a different platform. Both were throughput ties on the RTX 3060.
 - Keep packed VAD at `--vad-batch-size 16 --vad-block-frames 512` for the measured production pipeline. A standalone all-at-once 500-file kernel favored 256 frames by 7.5%, but the actual four-group preparation pipeline was about 5% faster at 512 frames and the mixed 69-minute-plus-500-file workload also favored longer blocks slightly; the production measurement takes precedence.
 - `--vad-threads` changes PyTorch's process-wide CPU thread count and also affects ASR feature preparation. The platform default was six threads on the validated Ryzen 5 5600X and was the measured optimum; do not increase it without paired end-to-end measurements.
-- The script rejects packed configurations above 32,768 padded frames per call, persistently lowers file-pack and temporal-block limits after CPU OOM, and isolates other failures recursively so one malformed or memory-heavy recording does not fail its companions.
+- The script rejects packed configurations above 32,768 padded frames per call, persistently lowers file-pack and temporal-block limits after CPU OOM, and isolates data-dependent failures recursively so one malformed or memory-heavy recording does not fail its companions. Invariant API and implementation errors fail the affected batch immediately instead of triggering a `2N-1` retry tree.
 
 ## Troubleshooting
 
