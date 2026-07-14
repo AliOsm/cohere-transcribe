@@ -178,10 +178,11 @@ See [Performance](https://github.com/AliOsm/cohere-transcribe-arabic-batch-infer
 
 - [Usage guide](https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference/blob/main/docs/usage.md): CLI and Python API usage, modes, batching, recovery, tuning, and troubleshooting.
 - [Architecture](https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference/blob/main/docs/architecture.md): runtime stages, module ownership, packaged assets, and design decisions.
+- [Upstream work](https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference/blob/main/docs/upstream.md): ecosystem issues and pull requests, their current status, and their relationship to the local runtime.
 - [Performance](https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference/blob/main/docs/performance.md): installed-wheel baselines, configuration studies, alternate engines, and reproducible timing guidance.
 - [Accuracy benchmarks](https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference/blob/main/docs/benchmarks.md): datasets, normalization, WER/CER, confidence intervals, and official-result comparisons.
 - [Development](https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference/blob/main/docs/development.md): uv environment, tests, package builds, and releases.
-- [Release reports](https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference/tree/main/reports): versioned CLI and runtime validation evidence.
+- [Release reports](https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference/tree/main/reports): versioned release-validation evidence.
 - [Changelog](https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference/blob/main/CHANGELOG.md): release-level user and developer changes.
 
 Run `cohere-transcribe --help` for the complete CLI reference.

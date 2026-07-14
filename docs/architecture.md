@@ -150,6 +150,8 @@ The wheel includes:
 
 Cohere ASR and MMS alignment weights are not redistributed. Their repository revisions are pinned in the runtime and downloaded from Hugging Face on first use.
 
+Related ecosystem issues and pull requests are tracked in [Upstream Work](upstream.md). That page separates packaged provenance and implemented local behavior from proposals that remain open or unmerged upstream.
+
 Output JSON and profile JSON have independent schema versions. A package release may change without changing a schema, and a schema change remains explicit in every artifact.
 
 ## Why These Defaults
