@@ -96,6 +96,68 @@ The overall normalization sensitivity is substantial:
 
 The overall rate is dominated by the reference-word distribution, not by an equal average of the five dataset percentages. Report dataset rows whenever deployment data resembles one source more than the full mixture.
 
+### Selected Model Variants
+
+Custom weights are supported as execution formats, not certified as accuracy-equivalent replacements. The balanced-500 manifest probe selected 100 clips from each frozen source, retained complete presegmented utterances, and scored all variants with the same lexical normalizer. Its source metadata totals 5,032.699 seconds, and its manifest SHA-256 is `f3ef275d10fcf7d60d1cef00f5131fd5335ded5cfd06bb50f544b7118a89fbf7`. Package profiles for the same 500-file selection report 5,035.715 seconds from decoded sample lengths. This smaller stratified set is useful for paired model comparisons, but its 22.9551% default-model WER is not the full suite's 31.3205% corpus-micro result.
+
+#### Specialized Dense Fine-Tune
+
+`NAMAA-Space/Cohere-Speech-Tashkeel-2B` at revision `710704bf787fa3c27f7567aa08078861925aeee2` is a native dense fine-tune intended to produce Arabic diacritics. Because lexical scoring removes combining marks, the table compares recognized words rather than rewarding or penalizing the presence of tashkeel.
+
+| Balanced-probe scope | Default dense WER / CER | Tashkeel fine-tune WER / CER | WER delta |
+|---|---:|---:|---:|
+| Overall | 22.9551% / 11.5812% | 29.2721% / 14.1214% | +6.3170 pp |
+| Casablanca dialect | 50.6162% / 21.5522% | 63.0282% / 28.3268% | +12.4120 pp |
+| Common Voice 18 Arabic | 5.2734% / 1.1535% | 7.8125% / 2.2275% | +2.5391 pp |
+| FLEURS `ar_eg` | 6.5716% / 3.5965% | 12.1243% / 6.2556% | +5.5527 pp |
+| Quran recitation proxy | 13.8484% / 10.0668% | 9.3294% / 5.4581% | -4.5190 pp |
+| SADA22 | 38.2192% / 21.6776% | 52.3288% / 28.5534% | +14.1096 pp |
+
+The fine-tune improved this Quran proxy but degraded both read-speech and dialect subsets, and its overall generation was slower. It is therefore a specialized output choice rather than a generally more accurate checkpoint. This probe measures lexical recognition only and does not evaluate the accuracy of the fine-tune's intended diacritization. The package's successful CLI run proves loader, generation, publication, and provenance compatibility; it does not turn this one probe into a recommendation for every tashkeel workload.
+
+#### Batch-Sensitive Dialectal Fine-Tune
+
+The model card for `oddadmix/cohere-transcribe-arabic-07-2026-dialectal@d8fa1665cec004e7b7cdeaec44a85dd139f4ac16` reports WER improving from 45.7% for its base to 35.7% after full fine-tuning on a private 932-clip dialect set. It also warns that augmentation-derived train and test rows may share source audio and that padded batch generation degraded its own evaluation. Those numbers cannot be independently reproduced without the private dataset, so the balanced probe tests transfer to different public sources rather than claiming to reproduce the model card.
+
+| Balanced-probe scope | Default dense WER / CER | Dialectal fine-tune batch-24 WER / CER | WER delta |
+|---|---:|---:|---:|
+| Overall | 22.9551% / 11.5812% | 49.6197% / 36.6863% | +26.6646 pp |
+| Casablanca dialect | 50.6162% / 21.5522% | 52.3768% / 22.1664% | +1.7606 pp |
+| Common Voice 18 Arabic | 5.2734% / 1.1535% | 137.1094% / 135.4415% | +131.8359 pp |
+| FLEURS `ar_eg` | 6.5716% / 3.5965% | 28.0693% / 24.1031% | +21.4977 pp |
+| Quran recitation proxy | 13.8484% / 10.0668% | 53.4257% / 45.6001% | +39.5773 pp |
+| SADA22 | 38.2192% / 21.6776% | 42.1918% / 23.4281% | +3.9726 pp |
+
+The batch-24 fine-tune changed 394 of 500 normalized hypotheses. Its overall WER increase over the default was 26.6646 percentage points with paired 95% interval `[+19.3266, +34.8099]`. The severe Common Voice insertion rate shows that this specialized checkpoint does not transfer safely to general read speech.
+
+Per-sample generation did not repair transfer accuracy on this probe: batch 1 produced 50.7528% WER and 37.4460% CER, versus 49.6197% and 36.6863% at batch 24. Batch 1 changed 51 hypotheses relative to batch 24 and its +1.1330-point WER delta had paired 95% interval `[-0.8973, +3.6152]`. This does not contradict the private-domain model-card result; it demonstrates that the checkpoint's recommended batching policy is dataset-dependent. The package exposes `--batch-size 1`, while users remain responsible for choosing it from evidence on their own domain.
+
+#### Saved Bitsandbytes INT8 and INT4
+
+`NAMAA-Space/cohere-transcribe-arabic-07-2026-int8@88a45a10a7afb54aeeeb9d7a50f88334886f5e74` and `NAMAA-Space/cohere-transcribe-arabic-07-2026-int4@b22c9187ea9993fb41f741b442abdf86fb89c6fa` were compared with dense BF16 at batch 24 on the same 500 IDs. Their reference WER changes were small, but neither produced byte-identical transcripts:
+
+| Checkpoint | WER | CER | WER delta vs dense | Lexically changed clips | Transcript disagreement WER | Paired WER-delta 95% interval |
+|---|---:|---:|---:|---:|---:|---:|
+| Dense BF16 | 22.9551% | 11.5812% | reference | 0 / 500 | 0.0000% | reference |
+| Saved INT8 | 22.9551% | 11.5782% | 0.0000 pp | 43 / 500 | 1.6047% | `[-0.4037, +0.3755]` pp |
+| Saved INT4 | 22.9862% | 11.3440% | +0.0310 pp | 140 / 500 | 5.8786% | `[-0.9085, +0.9770]` pp |
+
+The intervals include zero, so this probe does not establish a reference-WER change for either checkpoint. INT8 stayed closer to the dense transcript, while INT4 changed more hypotheses. Batch-size sweeps also changed a small number of BF16/quantized outputs, so deployments that require deterministic transcript parity must freeze checkpoint, revision, dtype, batch policy, and software environment. The associated speed and VRAM measurements are in [Performance](performance.md#saved-bitsandbytes-checkpoints).
+
+#### Public Darija LoRA
+
+The adapter path was evaluated independently with `amzilmustapha/cohere-darija-lora-10-7-26` at revision `62b404e762b51c97e8167cbc2fb9781e356d6a1f` on 100 Moroccan Casablanca clips totaling 364.718 seconds. These clips were not used to choose the package's merge implementation.
+
+| Path | Lexical WER | Lexical CER | WER delta vs base |
+|---|---:|---:|---:|
+| Dense base | 53.36% | 16.48% | reference |
+| LoRA, safely merged package path | 289.85% | 315.20% | +236.50 pp |
+| LoRA, unmerged research control | 303.76% | 316.27% | +250.41 pp |
+
+WER and CER can exceed 100% when insertions outnumber reference units. The merged adapter produced long repetitive outputs: 39 of 100 hypotheses exceeded twice the reference word count, 18 exceeded five times, and 9 exceeded ten times. The paired 95% interval for the merged WER increase was `[+174.05, +311.55]` percentage points. Only 28% of merged and unmerged hypotheses matched exactly, which also shows that the merge path must be evaluated rather than assumed numerically identical for an arbitrary adapter.
+
+This adapter passed structural compatibility and actual package execution but failed the independent accuracy gate. It is not recommended here. The result does not imply that LoRA itself is inaccurate; it establishes that adapter metadata, successful loading, and an in-domain label are insufficient evidence. Every adapter needs independent references representative of its intended deployment.
+
 ### Repetition Guard
 
 The selected BF16 length-sorted baseline measured 32.2576% WER. Enabling the documented periodic-loop stop with the projection optimization changed 125 of 24,414 hypotheses and reduced WER on this suite to 31.3205%, a difference of -0.9371 percentage points with paired 95% CI `[-1.4766, -0.4781]`.
@@ -217,7 +279,7 @@ This supports the selected length-sorted batch 24 configuration on the tested RT
 
 ### VAD and Segment Construction
 
-The balanced 500-file probe contains 100 already segmented utterances from each dataset and 5,035.715 seconds of audio. Because each source is already an evaluation utterance, it favors retaining the complete clip and penalizes a VAD that removes quiet or short reference speech. It is a configuration-sensitivity test, not an estimate of VAD accuracy on continuous recordings.
+The VAD sensitivity run uses the same balanced-500 file selection. Package profiles total 5,035.715 decoded seconds; the source metadata total used by component scoring is 5,032.699 seconds. Because each source is already an evaluation utterance, it favors retaining the complete clip and penalizes a VAD that removes quiet or short reference speech. It is a configuration-sensitivity test, not an estimate of VAD accuracy on continuous recordings.
 
 | Probe revision and segmentation | Rows | Lexical WER | Interpretation |
 |---|---:|---:|---|
@@ -240,11 +302,11 @@ In the older aligner timing fixture, segment interpolation differed from FP32 by
 
 The 69-minute Arabic grammar lecture has no human reference transcript. Matching its output hashes proves repeatability, not WER, and disagreements between its Silero, Auditok, and no-VAD transcripts are edit-distance disagreements rather than accuracy measurements.
 
-## Applicability to v0.1.0
+## Applicability to the Package
 
-The full 24,414-clip inference run bypassed VAD and alignment and was not rerun from the installed wheel. It therefore characterizes the optimized Cohere ASR path and selected generation safeguards, not end-to-end v0.1.0 behavior on unsegmented recordings. Sample-exact VAD and merge behavior were evaluated separately on the balanced 500-file probe.
+The full 24,414-clip inference run bypassed VAD and alignment and was not rerun from an installed wheel. It therefore characterizes the optimized Cohere ASR path and selected generation safeguards, not end-to-end package behavior on unsegmented recordings. Sample-exact VAD and merge behavior were evaluated separately on the balanced-500 selection.
 
-A built v0.1.0 wheel reproduced the retained long-form TXT, SRT, and VTT hashes and all 500 balanced-corpus transcripts. This is implementation-regression evidence, not a replacement for a full installed-wheel WER rerun. Package performance values are in [Performance](performance.md), and wheel validation evidence is in [`reports/0.1.0-release-validation.json`](../reports/0.1.0-release-validation.json).
+A built v0.1.0 wheel reproduced the retained long-form TXT, SRT, and VTT hashes and all 500 balanced-corpus transcripts. The v0.1.1 candidate then preserved all 500 default-model transcripts while adding Hub/local custom-model loading and separate alternate-checkpoint evaluations. These are implementation-regression and model-comparison results, not a replacement for a full installed-wheel WER rerun. Package performance values are in [Performance](performance.md), and versioned wheel evidence is under [`reports/`](../reports/).
 
 ## What the Evidence Does Not Establish
 
@@ -254,7 +316,7 @@ A built v0.1.0 wheel reproduced the retained long-form TXT, SRT, and VTT hashes 
 - WER does not measure punctuation quality, semantic fidelity, named entities, dialect faithfulness, hallucination severity, or downstream task utility.
 - CER and WER can rank systems differently, as seen in the dialect and SADA results.
 - Wit/Tafrigh results include cloud nondeterminism, Auditok, MP3 encoding, padding, and service behavior; they are not a controlled recognizer-only comparison.
-- The v0.1.0 package has exact regression parity on the retained long-form and balanced-500 workloads, but no installed-wheel full 24,414-clip rerun has been completed.
+- The package has exact regression parity on the retained long-form and balanced-500 workloads, but no installed-wheel full 24,414-clip rerun has been completed.
 - No absolute word-timestamp error can be reported without a human-aligned timing set.
 
 ## Evidence and Provenance
@@ -270,5 +332,16 @@ The retained research workspace used the following primary machine-readable arti
 | `benchmark/results/wit_full_default_20260710/summary.json` | `2726e15b57156298849b5315d9fff6bbca471a1983924afda653e1209d3f3c89` | Wit/Tafrigh completion and request telemetry |
 | `benchmark/reports/vad_modes_500_20260711.json` | `1c1e825dd1ca688a4badbc6d7efb5bef10f8e3e10de128ebe28427bb31220237` | Balanced-500 segmentation sensitivity |
 | `benchmark/reports/timestamp_modes_500_20260711.json` | `8947fb3ae5d8023d73114a66e88586143262e58eed773a6e00ce75394db094d1` | Balanced-500 timing-mode comparison |
+| `benchmark/manifests/wit_probe500.jsonl` | `f3ef275d10fcf7d60d1cef00f5131fd5335ded5cfd06bb50f544b7118a89fbf7` | Stratified 500-clip model-variant manifest |
+| `benchmark/results/model_variants_20260714/base_probe500_control/summary.json` | `ffa208adb3f543e674fbab772c1df8a5521abc4604ade67544695cc5e24b1872` | Dense BF16 control for model variants |
+| `benchmark/results/model_variants_20260714/int8_probe500_sweep/summary.json` | `3f0e9a3e9eb74c37fc6efab970196b3b920e4357b425a0cb003a7abaad14fbba` | Saved INT8 batch sweep and reference scores |
+| `benchmark/results/model_variants_20260714/int4_probe500_sweep/summary.json` | `de4d80ceee27952f3ceb031900e2c0d7773ad4c455d42a80af37d413fcebd9e2` | Saved INT4 batch sweep and reference scores |
+| `benchmark/results/model_variants_20260714/tashkeel_probe500/summary.json` | `3dbf8f02f64a0d4e2235df4786df346c2b15189f0f97ff9358667f78e987eb5d` | Specialized dense fine-tune comparison |
+| `benchmark/results/model_variants_20260714/dialectal_probe500/summary.json` | `0569679836bd645f51e0dde3cc44df059ab8aefa3f325df96ac9d1744ffb3b37` | Dialectal dense fine-tune at batch 24 |
+| `benchmark/results/model_variants_20260714/dialectal_probe500_b1/summary.json` | `d0fb913b92748e7d65f47468054bee1e4e71d0c534ae7ba48294d954e0a1dce3` | Dialectal dense fine-tune at batch 1 |
+| `benchmark/research/quantized_models_20260714/analysis.json` | `3a8cee467a3e10169b92a0fb5bc3fd52e5c21d4ad47029c462bdfaecaa2f4a98` | Paired INT8/INT4 transcript divergence and confidence intervals |
+| `benchmark/results/model_variants_20260714/peft_darija_morocco100_base.json` | `58dbaa42bd0aea3072cc4b3559b74a0a4c3f09d4bd32bdacca36cefac07df65b` | Dense-base control for the adapter probe |
+| `benchmark/results/model_variants_20260714/peft_darija_morocco100_merged.json` | `745d49fe2a8bbe1c9edcff46844e41647fca757f966bb0b5f7c1c154c2488786` | Independent merged-adapter accuracy and timing failure case |
+| `benchmark/results/model_variants_20260714/peft_darija_morocco100_unmerged.json` | `29c8e20004b759e93a257b510c9e9a70b7731301585855401fa957e7e6e1ed90` | Unmerged PEFT research control |
 
 Before accepting an accuracy claim, verify the model revision, inference fingerprint, manifest hash, scorer profile, grouping policy, sample count, and whether the run included VAD. Before accepting a performance claim, repeat complete external process timing after a warm model download and preserve transcript/reference comparisons alongside the timing result.

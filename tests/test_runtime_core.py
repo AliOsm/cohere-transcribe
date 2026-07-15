@@ -498,9 +498,15 @@ class OutputTransactionTest(unittest.TestCase):
             self.assertEqual(payload["transcript"], ["النص الاصلي"])
             self.assertEqual(
                 payload["models"]["asr"],
-                {"id": MODEL_ID, "revision": ASR_MODEL_REVISION},
+                {
+                    "id": MODEL_ID,
+                    "revision": ASR_MODEL_REVISION,
+                    "format": "dense",
+                    "quantization": None,
+                    "adapter": None,
+                },
             )
-            self.assertEqual(payload["schema_version"], 7)
+            self.assertEqual(payload["schema_version"], 8)
             self.assertEqual(payload["repetition_stopped_segments"], [])
             self.assertEqual(
                 payload["segmentation_details"],

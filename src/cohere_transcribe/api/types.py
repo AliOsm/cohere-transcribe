@@ -8,7 +8,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, overload
 
+from ..model_identity import DEFAULT_ASR_MODEL_ID
+
 AudioInput = str | os.PathLike[str] | Sequence[str | os.PathLike[str]]
+ModelReference = str | os.PathLike[str]
 Language = Literal["ar", "en"]
 OutputFormat = Literal["txt", "srt", "vtt", "json"]
 ResultStatus = Literal["completed", "failed", "skipped"]
@@ -46,6 +49,10 @@ class PublicationOptions:
 class TranscriptionOptions:
     """Complete transcription configuration shared with the command-line interface."""
 
+    model: ModelReference = DEFAULT_ASR_MODEL_ID
+    model_revision: str | None = None
+    adapter: ModelReference | None = None
+    adapter_revision: str | None = None
     language: Language = "ar"
     text_only: bool = False
     recursive: bool = True
@@ -122,6 +129,11 @@ class SubtitleCue:
 class TranscriptionProvenance:
     """Per-file decoder, VAD, generation, and alignment provenance."""
 
+    model_id: str | None = None
+    model_revision: str | None = None
+    model_format: str | None = None
+    adapter_id: str | None = None
+    adapter_revision: str | None = None
     decode_backend: str | None = None
     decode_fallback_reason: str | None = None
     vad_engine_requested: str | None = None

@@ -37,7 +37,7 @@ jobs:
     needs: build
     environment:
       name: testpypi
-      url: https://test.pypi.org/project/cohere-transcribe-arabic/
+      url: https://test.pypi.org/project/cohere-transcribe/
     permissions:
       id-token: write
     steps:
@@ -65,7 +65,7 @@ jobs:
           for attempt in 1 2 3 4 5; do
             if python -m pip download --no-deps \
               --index-url https://test.pypi.org/simple/ \
-              "cohere-transcribe-arabic==$PACKAGE_VERSION" \
+              "cohere-transcribe==$PACKAGE_VERSION" \
               --dest /tmp/cohere-testpypi; then
               break
             fi
@@ -86,7 +86,7 @@ jobs:
           import cohere_transcribe
 
           expected = os.environ["PACKAGE_VERSION"]
-          assert version("cohere-transcribe-arabic") == expected
+          assert version("cohere-transcribe") == expected
           assert cohere_transcribe.__version__ == expected
           assert files("cohere_transcribe").joinpath("py.typed").is_file()
           PY

@@ -120,7 +120,7 @@ def test_pipeline_submits_first_preparation_before_loading_asr(
             ]
         )
 
-    def load(_device, _dtype):
+    def load(_device, _dtype, _model_id, _model_revision, *_model_options):
         order.append("asr-load")
         return object(), object()
 

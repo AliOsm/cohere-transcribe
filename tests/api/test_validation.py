@@ -56,6 +56,37 @@ def test_text_only_and_word_alignment_conflict_is_rejected() -> None:
         )
 
 
+@pytest.mark.parametrize("field", ["model", "adapter"])
+@pytest.mark.parametrize(
+    "reference", [Path("missing-model"), Path("owner/missing-model")]
+)
+def test_path_like_model_references_are_always_local(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    reference: Path,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    options = TranscriptionOptions(**{field: reference})  # type: ignore[arg-type]
+
+    with pytest.raises(
+        TranscriptionConfigurationError,
+        match=rf"{field.capitalize()} directory .* does not exist",
+    ):
+        transcribe("unused.wav", options=options)
+
+
+def test_unresolvable_tilde_model_is_a_typed_configuration_error() -> None:
+    with pytest.raises(
+        TranscriptionConfigurationError,
+        match="Cannot resolve model path",
+    ):
+        transcribe(
+            "unused.wav",
+            options=TranscriptionOptions(model="~definitely-no-such-user-ct/model"),
+        )
+
+
 _INTEGER_OPTIONS = (
     "preprocess_workers",
     "vad_batch_size",

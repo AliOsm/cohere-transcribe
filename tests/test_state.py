@@ -113,6 +113,29 @@ def test_asr_and_render_contracts_have_separate_semantics(tmp_path: Path) -> Non
     assert render_contract_key(base) != render_contract_key(render_change)
     assert asr_contract_key(base) != asr_contract_key(replace(base, dtype="fp16"))
     assert asr_contract_key(base) != asr_contract_key(
+        replace(base, model="owner/alternate", model_revision="8" * 40)
+    )
+    assert asr_contract_key(base) != asr_contract_key(
+        replace(base, model_revision="9" * 40)
+    )
+    assert asr_contract_key(base) != asr_contract_key(
+        replace(
+            base,
+            model_format="bitsandbytes-int4",
+            model_quantization={
+                "quant_method": "bitsandbytes",
+                "load_in_4bit": True,
+            },
+        )
+    )
+    assert asr_contract_key(base) != asr_contract_key(
+        replace(
+            base,
+            adapter="owner/adapter",
+            adapter_revision="a" * 40,
+        )
+    )
+    assert asr_contract_key(base) != asr_contract_key(
         replace(base, audio_memory_gb=base.audio_memory_gb / 2)
     )
     assert asr_contract_key(base) != asr_contract_key(
@@ -340,6 +363,34 @@ def test_render_changes_resume_asr_but_asr_changes_do_not(tmp_path: Path) -> Non
     try:
         assert not changed.asr_checkpoint_loaded
         assert changed.asr_contract_key != original_asr_key
+    finally:
+        release_output_locks([changed])
+
+
+def test_model_identity_change_rejects_verified_skip_and_checkpoint(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "clip.wav"
+    source.write_bytes(b"audio")
+    output_dir = tmp_path / "out"
+    original = build_one(make_config(source, output_dir))
+    try:
+        publish(original)
+        original_asr_key = original.asr_contract_key
+    finally:
+        release_output_locks([original])
+
+    changed_args = replace(
+        make_config(source, output_dir, existing="skip"),
+        model="owner/alternate",
+        model_revision="b" * 40,
+    )
+    changed = build_one(changed_args)
+    try:
+        assert not changed.skipped
+        assert not changed.asr_checkpoint_loaded
+        assert changed.asr_contract_key != original_asr_key
+        assert changed.segment_texts == []
     finally:
         release_output_locks([changed])
 

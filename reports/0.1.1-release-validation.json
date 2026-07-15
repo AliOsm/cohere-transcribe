@@ -1,13 +1,13 @@
 {
-  "package_version": "0.1.0",
-  "validation_snapshot": "2026.07.14-final-python-api",
+  "package_version": "0.1.1",
+  "validation_snapshot": "2026.07.14-model-variants",
   "created_at": "2026-07-14",
   "entry_point": "cohere-transcribe",
   "default_alignment": "segment",
   "validated_monolith_sha256": "f31aac815ae15c82328d25cc45b98711aa63779d74e669b9427541289b17b04a",
-  "output_schema_version": 7,
-  "profile_schema_version": 8,
-  "state_contract_schema_version": 2,
+  "output_schema_version": 8,
+  "profile_schema_version": 9,
+  "state_contract_schema_version": 3,
   "python_validated": "3.12.12",
   "torch_validated": "2.11.0+cu128",
   "torchaudio_validated": "2.11.0+cu128",
@@ -1142,15 +1142,359 @@
       "Choose and document project and bundled-source licensing terms before presenting the package as generally reusable open source."
     ]
   },
+  "model_variant_validation": {
+    "evaluated_at": "2026-07-14",
+    "scope": "Native dense Cohere ASR checkpoints, saved bitsandbytes INT8/INT4 checkpoints, and PEFT LoRA adapters over a dense base.",
+    "runtime_dependencies": {
+      "accelerate": "1.13.0",
+      "bitsandbytes": "0.49.2",
+      "peft": "0.19.1"
+    },
+    "compatibility_contract": {
+      "dense": "Native Transformers CohereAsrConfig, CohereAsrProcessor, CohereAsrForConditionalGeneration, and a supported safetensors or PyTorch weight entry point with remote code disabled.",
+      "saved_quantized": "bitsandbytes INT8 or INT4 metadata detected from config.json; CUDA placement through Accelerate; no post-load model move.",
+      "adapter": "LoRA plus SEQ_2_SEQ_LM metadata, exact dense-base repository agreement, optional base-revision agreement, read-only PEFT load, safe merge, wrapper removal, then Cohere hot-path patching.",
+      "unsupported": "Remote-code models, other quantizers, ambiguous INT4/INT8 metadata, quantized CPU/MPS execution, adapters over saved quantized bases, ONNX ASR, GGUF, and MLX."
+    },
+    "package_path_validation": {
+      "dense_cli": "Tashkeel and dialectal checkpoints completed real CUDA CLI transcription with TXT/JSON/profile publication and exact immutable provenance.",
+      "int8_cli": "Single-file segment-timed CUDA run completed with saved INT8 provenance and bounded memory.",
+      "int4_api": "Recursive two-file Python API run completed across MSA and dialect audio, including nested publication, checkpoint state, profile provenance, and verified skip reuse.",
+      "adapter_cli": "Four-file CUDA run loaded, safely merged, patched, transcribed, and published the selected public adapter with exact base and adapter commits.",
+      "doctor": "Dense, INT8, and adapter selections resolved immutable commits, validated native processor/config and weight-artifact contracts, imported required optional runtimes, and did not load weights. INT8 passed with CUDA and failed when CUDA was hidden.",
+      "unsupported_repository": "The live Masterx/cohere-transcribe-arabic-07-2026-ONNX check was rejected from Hub metadata before input planning because it has no supported Transformers weight entry point."
+    },
+    "default_model_regression": {
+      "workload": "Balanced 500-file package workload with packed PyTorch Silero, text output, and batch 24",
+      "external_wall_seconds": 39.16,
+      "profile_elapsed_seconds": 38.15295427502133,
+      "successful_files": 500,
+      "failed_files": 0,
+      "processor_rows": 729,
+      "generation_batches": 33,
+      "generated_tokens": 21587,
+      "peak_cuda_allocated_gib": 6.053555011749268,
+      "output_identity": "500/500 TXT files were byte-identical to the retained release output.",
+      "interpretation": "The result matches the 39.27-second installed-wheel median and retained work counts; no default transcript or performance regression was observed."
+    },
+    "balanced_model_probe": {
+      "manifest_sha256": "f3ef275d10fcf7d60d1cef00f5131fd5335ded5cfd06bb50f544b7118a89fbf7",
+      "clips": 500,
+      "audio_seconds": 5032.69864682408,
+      "composition": "100 clips each from Casablanca, Common Voice 18 Arabic, FLEURS ar_eg, a Quran Classical Arabic proxy, and SADA22",
+      "timing_boundary": "Warm model; complete-clip decode, processor, generation, and text decode; excludes model load, VAD, alignment, and publication.",
+      "dense_bf16_batch24": {
+        "wall_seconds": 32.45971645897953,
+        "generation_seconds": 27.662632694933563,
+        "peak_cuda_allocated_gib": 9.425797939300537,
+        "lexical_wer_percent": 22.955145118733508,
+        "lexical_cer_percent": 11.581191448474658
+      },
+      "saved_int8_batch24": {
+        "model": "NAMAA-Space/cohere-transcribe-arabic-07-2026-int8",
+        "revision": "88a45a10a7afb54aeeeb9d7a50f88334886f5e74",
+        "wall_seconds": 70.673,
+        "generation_seconds": 65.715,
+        "peak_cuda_allocated_gib": 7.761,
+        "static_model_gib": 2.179,
+        "lexical_wer_percent": 22.9551,
+        "lexical_cer_percent": 11.5782,
+        "changed_hypotheses": 43,
+        "transcript_divergence_wer_percent": 1.6047,
+        "wer_delta_percentage_points": 0.0,
+        "paired_95_percent": [
+          -0.4037,
+          0.3755
+        ]
+      },
+      "saved_int4_batch24": {
+        "model": "NAMAA-Space/cohere-transcribe-arabic-07-2026-int4",
+        "revision": "b22c9187ea9993fb41f741b442abdf86fb89c6fa",
+        "wall_seconds": 43.658,
+        "generation_seconds": 38.758,
+        "peak_cuda_allocated_gib": 6.95,
+        "static_model_gib": 1.344,
+        "lexical_wer_percent": 22.9862,
+        "lexical_cer_percent": 11.344,
+        "changed_hypotheses": 140,
+        "transcript_divergence_wer_percent": 5.8786,
+        "wer_delta_percentage_points": 0.031,
+        "paired_95_percent": [
+          -0.9085,
+          0.977
+        ]
+      },
+      "tashkeel_dense_batch24": {
+        "model": "NAMAA-Space/Cohere-Speech-Tashkeel-2B",
+        "revision": "710704bf787fa3c27f7567aa08078861925aeee2",
+        "wall_seconds": 41.525374031974934,
+        "generation_seconds": 36.6442549811909,
+        "peak_cuda_allocated_gib": 9.425797939300537,
+        "lexical_wer_percent": 29.272078224429615,
+        "lexical_cer_percent": 14.121426855632957,
+        "interpretation": "Lexical recognition only; combining marks are removed by the scorer, so diacritization accuracy was not measured."
+      },
+      "dialectal_dense_batch24": {
+        "model": "oddadmix/cohere-transcribe-arabic-07-2026-dialectal",
+        "revision": "d8fa1665cec004e7b7cdeaec44a85dd139f4ac16",
+        "wall_seconds": 37.32933449599659,
+        "generation_seconds": 32.53324769093888,
+        "peak_cuda_allocated_gib": 9.425797939300537,
+        "lexical_wer_percent": 49.61974235604532,
+        "lexical_cer_percent": 36.686283929858276,
+        "wer_delta_vs_default_percentage_points": 26.6646,
+        "paired_95_percent": [
+          19.3266,
+          34.8099
+        ]
+      },
+      "dialectal_dense_batch1": {
+        "wall_seconds": 119.01521973102354,
+        "generation_seconds": 114.78244094975526,
+        "peak_cuda_allocated_gib": 4.392222881317139,
+        "lexical_wer_percent": 50.75275492782865,
+        "lexical_cer_percent": 37.44595243814557,
+        "wer_delta_vs_batch24_percentage_points": 1.133,
+        "paired_95_percent": [
+          -0.8973,
+          3.6152
+        ],
+        "interpretation": "The private-domain model-card batch-1 advantage did not reproduce on this independent public probe; policy remains user-selectable."
+      }
+    },
+    "adapter_probe": {
+      "model": "amzilmustapha/cohere-darija-lora-10-7-26",
+      "revision": "62b404e762b51c97e8167cbc2fb9781e356d6a1f",
+      "clips": 100,
+      "audio_seconds": 364.7179962156,
+      "dense_base": {
+        "wall_seconds": 3.507418487977702,
+        "generation_seconds": 2.6306300699943677,
+        "peak_cuda_allocated_gib": 4.637724876403809,
+        "lexical_wer_percent": 53.35515548281505,
+        "lexical_cer_percent": 16.47717631087731
+      },
+      "safely_merged": {
+        "wall_seconds": 13.147684020979796,
+        "generation_seconds": 12.335496252053417,
+        "peak_cuda_allocated_gib": 4.637724876403809,
+        "lexical_wer_percent": 289.85270049099836,
+        "lexical_cer_percent": 315.20447989139655
+      },
+      "unmerged_control": {
+        "wall_seconds": 23.806695817038417,
+        "generation_seconds": 22.929412946046796,
+        "peak_cuda_allocated_gib": 4.760741233825684,
+        "lexical_wer_percent": 303.76432078559736,
+        "lexical_cer_percent": 316.2735448837604
+      },
+      "interpretation": "The adapter is mechanically compatible but failed the independent accuracy gate. This is not a general claim about LoRA. Safe merging restored dense peak allocation and reduced generation time versus the unmerged control."
+    }
+  },
+  "model_selection_five_reviewer_audit": {
+    "evaluated_at": "2026-07-14",
+    "policy": "Apply implementation changes only to findings independently identified by at least two of five reviewers.",
+    "review_scopes": [
+      "Model identity, Hugging Face metadata, and compatibility classification",
+      "ASR loading, resource lifetime, checkpoint resume, and dependency preflight",
+      "CLI, doctor, Python API, output/profile provenance, and failure handling",
+      "State contracts, publication behavior, packaging, and release artifacts",
+      "Tests, documentation accuracy, maintainability, and end-to-end coverage"
+    ],
+    "consensus_fixes": [
+      {
+        "agreement": "3/5",
+        "finding": "Hugging Face cache parsing selected the first snapshots ancestor.",
+        "resolution": "Select the innermost valid 40-character snapshot commit and cover unrelated ancestors in tests."
+      },
+      {
+        "agreement": "3/5",
+        "finding": "Doctor could report an optional import failure and then report that runtime as usable.",
+        "resolution": "Gate version success on successful imports and handle a missing PyTorch runtime directly."
+      },
+      {
+        "agreement": "2/5",
+        "finding": "Doctor model-selection flags were ignored without --model-access.",
+        "resolution": "Any non-default model, revision, adapter, or adapter revision implies model-access validation."
+      },
+      {
+        "agreement": "3/5",
+        "finding": "Alternate-model provenance lacked one integrated API/output/profile assertion.",
+        "resolution": "Exercise immutable adapter identity through public API job construction, returned provenance, JSON, and profile."
+      },
+      {
+        "agreement": "2/5",
+        "finding": "Documentation implied checkpoint payloads expose model identity.",
+        "resolution": "State that outputs and profiles expose identity while checkpoint and cache contract keys bind it."
+      },
+      {
+        "agreement": "2/5",
+        "finding": "Checkpoint-only rendering required model-specific optional runtimes.",
+        "resolution": "Require fresh-ASR weights and dependencies only when at least one runnable job lacks a compatible ASR checkpoint."
+      },
+      {
+        "agreement": "2/5",
+        "finding": "Checkpoint-only jobs depended on model weight artifacts remaining cached.",
+        "resolution": "Resolve immutable metadata for contract matching, then defer supported-weight verification until fresh ASR is required."
+      }
+    ],
+    "single_reviewer_notes_not_changed": [
+      "Accepting nonstandard top-level quantization metadata without quantization_config",
+      "Binding optional runtime versions into durable transcript contracts",
+      "Rejecting redundant bitsandbytes alias fields beyond their resolved meaning",
+      "Changing private-repository access wording",
+      "Adding a pre-Ampere policy for checkpoints saved with BF16 compute metadata"
+    ],
+    "validation": {
+      "source_suite": "522 passed plus 6 subtests on Python 3.12.12",
+      "ruff_format": "passed for 88 Python files",
+      "ruff_lint": "passed",
+      "strict_public_api_mypy": "passed",
+      "uv_lock_check": "passed with 112 resolved packages",
+      "compileall": "passed",
+      "int4_word_alignment_smoke": {
+        "model": "NAMAA-Space/cohere-transcribe-arabic-07-2026-int4",
+        "revision": "b22c9187ea9993fb41f741b442abdf86fb89c6fa",
+        "audio_seconds": 8.0,
+        "external_wall_seconds": 15.63,
+        "profile_elapsed_seconds": 14.554120092012454,
+        "asr_load_seconds": 5.086294750042725,
+        "asr_wall_seconds": 1.0879125500214286,
+        "aligner_load_seconds": 1.1713439570157789,
+        "emissions_seconds": 0.3085815500235185,
+        "processor_rows": 1,
+        "generated_tokens": 53,
+        "aligned_words": 23,
+        "subtitle_cues": 4,
+        "alignment_fallbacks": 0,
+        "oom_retries": 0,
+        "truncation_retries": 0,
+        "installed_wheel_repeat": {
+          "external_wall_seconds": 14.69,
+          "profile_elapsed_seconds": 13.665821128000971,
+          "asr_load_seconds": 5.3416355029912665,
+          "asr_wall_seconds": 1.0521873389952816,
+          "aligner_load_seconds": 1.2102158709894866,
+          "emissions_seconds": 0.2745879319845699
+        },
+        "result": "Source and rebuilt-wheel runs passed with the same 23 aligned words, 4 cues, no alignment fallback, and exact saved INT4 repository, commit, format, and quantization provenance in output schema 8 and profile schema 9."
+      }
+    }
+  },
+  "local_model_path_validation": {
+    "evaluated_at": "2026-07-14",
+    "behavior": {
+      "hub_strings": "Repository strings remain eligible Hugging Face references and optional revisions resolve to immutable commits.",
+      "local_strings": "Existing directories and explicit path-shaped strings are local sources; missing explicit paths fail before model loading.",
+      "pathlike_api_values": "PathLike model and adapter values always mean existing local directories.",
+      "identity": "Local directories are canonicalized and carry a null revision through resources, checkpoint contracts, Python result provenance, JSON output, and profiles.",
+      "loading": "Transformers and PEFT receive the canonical directory directly and receive no revision keyword.",
+      "storage": "The package does not copy, fingerprint, upload, download, or create another cache for a local source.",
+      "lifetime_limit": "In-place mutation while a reusable Transcriber owns the loaded resource is unsupported."
+    },
+    "actual_cuda_runs": {
+      "host": "NVIDIA GeForce RTX 3060 12 GB with PyTorch 2.11.0+cu128",
+      "offline_mode": "HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 for fully local runs",
+      "sources": [
+        "Default dense model local snapshot",
+        "NAMAA saved INT8 local snapshot",
+        "NAMAA saved INT4 local snapshot",
+        "NAMAA Tashkeel dense local snapshot",
+        "Darija LoRA local snapshot"
+      ],
+      "dense_segment_smoke": {
+        "audio_seconds": 8.0,
+        "profile_elapsed_seconds": 5.852595706004649,
+        "asr_load_seconds": 3.06868642300833,
+        "asr_wall_seconds": 0.7391106290160678,
+        "processor_rows": 1,
+        "generated_tokens": 50,
+        "words": 23,
+        "peak_cuda_allocated_gib": 3.8724937438964844,
+        "identity_result": "Canonical local directory and null revision published"
+      },
+      "installed_wheel_dense_repeat": {
+        "profile_elapsed_seconds": 5.893463597050868,
+        "transcript_result": "Byte-identical to the source package local-path run",
+        "identity_result": "Canonical local directory and null revision published",
+        "doctor_result": "Installed cohere-transcribe-doctor local model-access validation passed"
+      },
+      "int4_word_smoke": "23 aligned words and 4 cues with FP16 word alignment and no fallback",
+      "tashkeel_parity": "Local-path transcript was byte-identical to the retained Hub-reference run",
+      "dense_batch": "Five files completed in one generation batch",
+      "reusable_transcriber": {
+        "first_resource_load_seconds": 3.0588,
+        "second_resource_acquisition_seconds": 0.000014,
+        "result": "The canonical local identity reused the loaded model"
+      },
+      "verified_skip": "A symlink alias canonicalized to the same identity and --existing skip avoided model loading"
+    },
+    "adapter_source_matrix": {
+      "cases": [
+        "Local base and local adapter",
+        "Hub base and local adapter",
+        "Local base and Hub adapter",
+        "Hub base and Hub adapter control"
+      ],
+      "transcript_sha256_all_cases": "efd99990fa81a7fcfa876b8bc050caf2f730d979cf1d5e6fb287bc15fae6482e",
+      "compatibility_policy": "Hub bases enforce the adapter's declared repository and optional revision. Local bases rely on PEFT structural loading and safe merge instead of historical repository strings."
+    },
+    "negative_cases": [
+      "Revision supplied with a local model",
+      "Revision supplied with a local adapter",
+      "Missing explicit string path",
+      "Missing local PathLike value",
+      "Existing non-directory path",
+      "Malformed tilde expansion",
+      "Incomplete local model or adapter weights",
+      "Missing, malformed, or non-object JSON metadata",
+      "Unsupported model architecture or quantizer",
+      "Saved quantized checkpoint selected on CPU"
+    ],
+    "five_reviewer_audit": {
+      "policy": "Apply implementation changes only to findings independently identified by at least two of five reviewers.",
+      "consensus_fixes": [
+        {
+          "agreement": "2/5",
+          "finding": "Converting Python API PathLike values to strings could lose explicit local intent.",
+          "resolution": "PathLike remains a local-only contract and missing directories fail before Hub resolution."
+        },
+        {
+          "agreement": "2/5",
+          "finding": "Malformed tilde expansion could raise RuntimeError outside typed CLI/API errors.",
+          "resolution": "Filesystem and expansion failures become concise ValueError diagnostics."
+        },
+        {
+          "agreement": "3/5",
+          "finding": "Documentation overstated quantization detail exposed by Python result provenance.",
+          "resolution": "Python provenance claims identity and format; complete quantization mapping is limited to JSON, profile, and state contracts."
+        }
+      ],
+      "single_reviewer_notes_not_changed": [
+        "Add optional-extra runtime jobs to CI",
+        "Change one doctor help sentence",
+        "Add a redundant static-typing fixture for adapter Path values"
+      ]
+    },
+    "validation": {
+      "source_suite": "556 passed on Python 3.12.12",
+      "ruff_format": "passed for 88 Python files",
+      "ruff_lint": "passed",
+      "strict_public_api_mypy": "passed",
+      "uv_lock_check": "passed with 112 resolved packages",
+      "compileall": "passed"
+    }
+  },
   "final_release_gate": {
     "evaluated_at": "2026-07-14",
-    "scope": "Cross-version path behavior, bounded publication-lock resources, complete source tests, and fresh distribution validation after the final release review.",
+    "scope": "Cross-version path behavior and the prior release review, followed by complete Python 3.12 source, distribution, default-model regression, and alternate Hub/local model validation after model-selection support.",
     "python_matrix": {
       "3.10.20": "477 passed plus 6 subtests",
       "3.11.15": "477 passed plus 6 subtests",
       "3.12.12": "477 passed plus 6 subtests",
       "3.13.14": "477 passed plus 6 subtests"
     },
+    "model_selection_source_suite": "556 passed on Python 3.12.12, including Hub and local model-source coverage and real TorchCodec decoding",
     "symlink_resolution": "Strict and allow-missing input, output-directory, profile, and nested-parent loops report a stable Symlink loop error across Python 3.10-3.13; genuinely missing non-input tails remain allowed.",
     "lock_registry": {
       "location_linux": "/tmp/cohere-transcribe-<uid>/outputs.lock",
@@ -1164,13 +1508,53 @@
       "ruff_format": "passed",
       "ruff_lint": "passed",
       "strict_mypy": "passed",
-      "uv_lock_check": "passed with 108 resolved packages; locked all-extras resolution passed for Python 3.10-3.13, with ONNX Runtime 1.23.2 selected on Python 3.10 and 1.27.0 on newer supported versions",
+      "uv_lock_check": "passed with 112 resolved packages after adding adapter and quantized extras; the prior locked all-extras resolution passed for Python 3.10-3.13",
       "compileall": "passed",
       "wheel_and_sdist_build": "passed",
       "twine_strict": "passed",
-      "installed_wheel_smoke": "passed"
+      "installed_wheel_smoke": "passed",
+      "distribution": "Wheel/sdist build, clean core install, strict Twine validation, and installed-wheel CUDA provenance smoke passed"
     },
-    "inference_impact": "No ASR, VAD, alignment, batching, decoding, or rendering implementation changed. Existing retained accuracy and performance evidence remains applicable."
+    "inference_impact": "Model identity resolution and loading changed. The unchanged default model reproduced 500/500 retained transcripts, processor-row, batch, and token counts in 39.16 seconds externally, matching the 39.27-second release median. Alternate weights have separate accuracy and performance evidence and are not claimed equivalent to the default."
   },
-  "notes": "Model weights are downloaded from Hugging Face on first use and are not included in the package. Segment timestamps are the default; TorchAudio and Uroman are installed only through the word extra. Word-alignment transcript identity was validated against frozen ASR output, so ASR WER is unchanged by the alignment-runtime migration. The 0.1.0 package organizes the validated implementation into shallow domain packages without changing inference logic. External process wall time includes package startup. Final profile schema 8 reports runtime imports and process-serialization wait separately from input validation and distinguishes all versus inferred segment durations; retained historical profiles in this report used schema 7. Packed Torch and sequence ONNX produced identical retained VAD timestamps and downstream transcripts; most VAD compute savings overlap GPU ASR in large folder runs. Exact runtime pins are limited to implementation-sensitive dependencies: Transformers private Cohere internals, the core Torch runtime, the optional Torch/TorchAudio ABI pair, Silero private weights, TorchCodec decoding behavior, and optional Uroman normalization behavior."
+  "notes": "Hub model weights are downloaded on first use and are not included in the package; existing local directories are loaded directly without Hub resolution. The default CohereLabs repository is gated; public custom checkpoints do not require access to it. Segment timestamps are the default; TorchAudio and Uroman are installed only through the word extra. Saved bitsandbytes and PEFT support are isolated behind quantized and adapters extras. Word-alignment transcript identity was validated against frozen ASR output, so ASR WER is unchanged by the alignment-runtime migration. External process wall time includes package startup. Profile schema 9 and output schema 8 add resolved model-format and adapter provenance; state contract schema 3 invalidates stale output when model, quantization, or adapter identity changes. Retained historical profiles in this report used earlier schemas. Packed Torch and sequence ONNX produced identical retained VAD timestamps and downstream transcripts; most VAD compute savings overlap GPU ASR in large folder runs. Exact runtime pins are limited to implementation-sensitive dependencies: Transformers private Cohere internals, the core Torch runtime, the optional Torch/TorchAudio ABI pair, Silero private weights, TorchCodec decoding behavior, and optional Uroman normalization behavior.",
+  "distribution_validation": {
+    "evaluated_at": "2026-07-15",
+    "import_package": "cohere_transcribe",
+    "console_commands": [
+      "cohere-transcribe",
+      "cohere-transcribe-doctor"
+    ],
+    "lockfile": "Root editable package resolved as cohere-transcribe 0.1.1.",
+    "artifacts": {
+      "wheel": "cohere_transcribe-0.1.1-py3-none-any.whl",
+      "source_distribution": "cohere_transcribe-0.1.1.tar.gz",
+      "metadata_name": "cohere-transcribe",
+      "twine_strict": "passed"
+    },
+    "clean_core_install": {
+      "environment": "Fresh Python 3.12 virtual environment with CPU dependency resolution",
+      "packages_installed": 59,
+      "dependency_check": "passed",
+      "public_import_and_typing_marker": "passed",
+      "console_help_and_version": "passed",
+      "doctor": "segment validation passed with expected optional-feature and CPU warnings"
+    },
+    "installed_cuda_smoke": {
+      "environment": "Wheel installed over the validated PyTorch 2.11.0+cu128 runtime",
+      "offline_model_resolution": true,
+      "input_seconds": 8,
+      "output_mode": "segment",
+      "words": 23,
+      "cues": 2,
+      "processor_rows": 1,
+      "generation_batches": 1,
+      "generated_tokens": 50,
+      "cuda_peak_allocated_gib": 3.87,
+      "result_distribution_provenance": "cohere-transcribe",
+      "profile_distribution_provenance": "cohere-transcribe",
+      "profile_environment_version": "0.1.1"
+    },
+    "distribution": "cohere-transcribe"
+  }
 }

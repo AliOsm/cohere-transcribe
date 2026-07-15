@@ -10,7 +10,9 @@ import shutil
 import sys
 from collections.abc import Sequence
 
-from ._version import __version__
+from packaging.version import Version
+
+from ._version import DISTRIBUTION_NAME, __version__
 from .audio.backends import (
     MIN_TORCHCODEC_VERSION,
     probe_torchcodec,
@@ -23,12 +25,12 @@ from .doctor_support import (
     ONNX_ASSET,
     Results,
 )
+from .model_identity import model_reference, resolve_model_identity
 from .models import (
     ALIGN_MODEL_ID,
     ALIGN_MODEL_REVISION,
     ALIGN_PACKAGE_REPOSITORY,
     ALIGN_PACKAGE_REVISION,
-    ASR_MODEL_REVISION,
     MODEL_ID,
     TRANSFORMERS_VERSION,
     UROMAN_VERSION,
@@ -53,7 +55,7 @@ def import_required(results: Results, module: str, feature: str):
 
 
 def validate_files(results: Results) -> None:
-    installed_version = package_version("cohere-transcribe-arabic")
+    installed_version = package_version(DISTRIBUTION_NAME)
     if installed_version is None:
         results.warn("package metadata is unavailable; running from a source checkout")
     elif installed_version == __version__:
@@ -341,16 +343,33 @@ def report_optional_runtime(results: Results, audio_backend: str = "auto") -> No
             )
 
 
-def validate_model_access(results: Results, include_aligner: bool) -> None:
+def validate_model_access(
+    results: Results,
+    include_aligner: bool,
+    *,
+    torch_runtime=None,
+    model_id: str = MODEL_ID,
+    model_revision: str | None = None,
+    adapter_id: str | None = None,
+    adapter_revision: str | None = None,
+) -> None:
     try:
-        from huggingface_hub import hf_hub_download
-        from transformers import AutoConfig, AutoProcessor, AutoTokenizer
+        from transformers import AutoConfig, AutoTokenizer
 
-        processor = AutoProcessor.from_pretrained(MODEL_ID, revision=ASR_MODEL_REVISION)
+        from .asr.model import load_asr_config_and_processor
+
+        identity = resolve_model_identity(
+            model_id,
+            model_revision,
+            adapter_id,
+            adapter_revision,
+        )
+        _, processor = load_asr_config_and_processor(
+            identity.model_id, identity.model_revision
+        )
         maximum = getattr(processor.feature_extractor, "max_audio_clip_s", None)
         if maximum is None:
             raise RuntimeError("processor does not expose max_audio_clip_s")
-        hf_hub_download(MODEL_ID, "config.json", revision=ASR_MODEL_REVISION)
         if include_aligner:
             aligner_config = AutoConfig.from_pretrained(
                 ALIGN_MODEL_ID, revision=ALIGN_MODEL_REVISION
@@ -371,13 +390,70 @@ def validate_model_access(results: Results, include_aligner: bool) -> None:
                 raise RuntimeError("pinned aligner input stride changed")
     except Exception as exc:
         if is_model_access_error(exc):
-            results.fail(model_access_message(exc))
+            restricted_id = (
+                adapter_id
+                if adapter_id is not None and adapter_id in str(exc)
+                else model_id
+            )
+            results.fail(model_access_message(exc, model_id=restricted_id))
         else:
-            results.fail(f"pinned model access: {type(exc).__name__}: {exc}")
+            results.fail(f"selected model access: {type(exc).__name__}: {exc}")
     else:
+        if identity.model_format.startswith("bitsandbytes-"):
+            if torch_runtime is None or not torch_runtime.cuda.is_available():
+                results.fail(
+                    f"Selected {identity.model_format} model requires an available "
+                    "CUDA device"
+                )
+            accelerate = import_required(
+                results, "accelerate", "quantized model placement"
+            )
+            bitsandbytes = import_required(
+                results, "bitsandbytes", "quantized model inference"
+            )
+            if accelerate is not None and bitsandbytes is not None:
+                accelerate_version = package_version("accelerate")
+                bitsandbytes_version = package_version("bitsandbytes")
+                if (
+                    accelerate_version is None
+                    or Version(accelerate_version) < Version("1.13.0")
+                    or bitsandbytes_version is None
+                    or Version(bitsandbytes_version) < Version("0.49.2")
+                ):
+                    results.fail(
+                        "Selected quantized model requires "
+                        f"{DISTRIBUTION_NAME}[quantized] with "
+                        "accelerate>=1.13.0 and bitsandbytes>=0.49.2; found "
+                        f"accelerate {accelerate_version or 'missing'}, bitsandbytes "
+                        f"{bitsandbytes_version or 'missing'}"
+                    )
+                else:
+                    results.ok(
+                        "quantized runtime: accelerate "
+                        f"{accelerate_version}, bitsandbytes {bitsandbytes_version}"
+                    )
+        if identity.adapter_id is not None:
+            peft = import_required(results, "peft", "adapter inference")
+            if peft is not None:
+                peft_version = package_version("peft")
+                if peft_version is None or Version(peft_version) < Version("0.19.1"):
+                    results.fail(
+                        "Selected adapter requires "
+                        f"{DISTRIBUTION_NAME}[adapters] with peft>=0.19.1; "
+                        f"found {peft_version or 'missing'}"
+                    )
+                else:
+                    results.ok(f"adapter runtime: peft {peft_version}")
         suffix = " and aligner" if include_aligner else ""
+        adapter_suffix = (
+            f", adapter {model_reference(identity.adapter_id, identity.adapter_revision)}"
+            if identity.adapter_id is not None
+            else ""
+        )
         results.ok(
-            f"pinned ASR processor{suffix} accessible; one-row limit is {maximum}s"
+            f"ASR processor {model_reference(identity.model_id, identity.model_revision)} "
+            f"({identity.model_format}){adapter_suffix}{suffix} accessible; "
+            f"one-row limit is {maximum}s"
         )
 
 
@@ -394,7 +470,27 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model-access",
         action="store_true",
-        help="Also contact Hugging Face and download the small pinned processor/config files.",
+        help="Also resolve and validate the selected Hugging Face processor/config files.",
+    )
+    parser.add_argument(
+        "--model",
+        default=MODEL_ID,
+        help="Hub repository or local model directory; implies --model-access.",
+    )
+    parser.add_argument(
+        "--model-revision",
+        default=None,
+        help="Optional Hub model commit, tag, or branch; implies --model-access.",
+    )
+    parser.add_argument(
+        "--adapter",
+        default=None,
+        help="Optional Hub repository or local LoRA adapter directory.",
+    )
+    parser.add_argument(
+        "--adapter-revision",
+        default=None,
+        help="Optional Hub adapter commit, tag, or branch; implies --model-access.",
     )
     parser.add_argument(
         "--audio-backend",
@@ -414,8 +510,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.mode == "word":
         validate_word_alignment(results, torch)
     report_optional_runtime(results, args.audio_backend)
-    if args.model_access:
-        validate_model_access(results, include_aligner=args.mode == "word")
+    selected_model_requested = (
+        args.model != MODEL_ID
+        or args.model_revision is not None
+        or args.adapter is not None
+        or args.adapter_revision is not None
+    )
+    if args.model_access or selected_model_requested:
+        validate_model_access(
+            results,
+            include_aligner=args.mode == "word",
+            torch_runtime=torch,
+            model_id=args.model,
+            model_revision=args.model_revision,
+            adapter_id=args.adapter,
+            adapter_revision=args.adapter_revision,
+        )
 
     print()
     if results.failures:

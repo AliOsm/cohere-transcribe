@@ -7,13 +7,12 @@ import math
 import os
 from collections.abc import Sequence
 
+from .._version import DISTRIBUTION_NAME
 from ..models import (
     ALIGN_MODEL_ID,
     ALIGN_MODEL_REVISION,
     ALIGN_PACKAGE_REPOSITORY,
     ALIGN_PACKAGE_REVISION,
-    ASR_MODEL_REVISION,
-    MODEL_ID,
     OUTPUT_SCHEMA_VERSION,
     REPETITION_DETECTOR_VERSION,
     SENTENCE_ENDINGS,
@@ -167,13 +166,23 @@ def build_result_payload(
         },
         "timing": job.alignment_mode,
         "models": {
-            "asr": {"id": MODEL_ID, "revision": ASR_MODEL_REVISION},
+            "asr": {
+                "id": job.model_id,
+                "revision": job.model_revision,
+                "format": job.model_format,
+                "quantization": job.model_quantization,
+                "adapter": (
+                    {"id": job.adapter_id, "revision": job.adapter_revision}
+                    if job.adapter_id is not None
+                    else None
+                ),
+            },
             "vad": (
                 {
                     "source": "silero-vad",
                     "source_version": SILERO_VERSION,
-                    "distribution": "cohere-transcribe-arabic",
-                    "version": package_version("cohere-transcribe-arabic"),
+                    "distribution": DISTRIBUTION_NAME,
+                    "version": package_version(DISTRIBUTION_NAME),
                     "weight_asset": (
                         "cohere_transcribe/vad/silero_vad_v6.onnx"
                         if job.vad_engine_actual == "onnx"
@@ -198,7 +207,7 @@ def build_result_payload(
                         "version": package_version("torchaudio"),
                     },
                     "utility_package": {
-                        "distribution": "cohere-transcribe-arabic",
+                        "distribution": DISTRIBUTION_NAME,
                         "location": "cohere_transcribe.alignment",
                         "repository": ALIGN_PACKAGE_REPOSITORY,
                         "revision": ALIGN_PACKAGE_REVISION,

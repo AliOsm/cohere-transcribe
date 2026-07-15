@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib
 import shutil
 
+from ._version import DISTRIBUTION_NAME
 from .models import (
     SILERO_VERSION,
     TRANSFORMERS_VERSION,
@@ -37,18 +38,50 @@ def preflight_forced_align() -> None:
         ) from exc
 
 
-def preflight_runtime(args: TranscriptionConfig) -> None:
+def preflight_runtime(
+    args: TranscriptionConfig, require_model_runtime: bool = True
+) -> None:
     """Import only dependencies required by the selected execution path."""
     import torch
 
-    required: list[tuple[str, str, str]] = [
-        (
-            "transformers",
-            "Cohere ASR",
-            f"transformers=={TRANSFORMERS_VERSION}",
-        ),
-    ]
-    if args.vad == "silero":
+    required: list[tuple[str, str, str]] = []
+    if require_model_runtime or args.alignment == "word":
+        required.append(
+            (
+                "transformers",
+                "Cohere ASR",
+                f"transformers=={TRANSFORMERS_VERSION}",
+            )
+        )
+    model_format = args.model_format or "dense"
+    if require_model_runtime and model_format.startswith("bitsandbytes-"):
+        if args.device != "cuda":
+            raise SystemExit(
+                f"{model_format} checkpoints currently require --device cuda"
+            )
+        required.extend(
+            [
+                (
+                    "accelerate",
+                    "saved bitsandbytes model placement",
+                    f"{DISTRIBUTION_NAME}[quantized]",
+                ),
+                (
+                    "bitsandbytes",
+                    "saved bitsandbytes model inference",
+                    f"{DISTRIBUTION_NAME}[quantized]",
+                ),
+            ]
+        )
+    if require_model_runtime and args.adapter is not None:
+        required.append(
+            (
+                "peft",
+                "LoRA adapter inference",
+                f"{DISTRIBUTION_NAME}[adapters]",
+            )
+        )
+    if require_model_runtime and args.vad == "silero":
         if args.vad_engine == "torch":
             required.append(
                 (
@@ -69,15 +102,15 @@ def preflight_runtime(args: TranscriptionConfig) -> None:
                 (
                     "onnxruntime",
                     "ONNX Silero VAD",
-                    "cohere-transcribe-arabic[onnx]",
+                    f"{DISTRIBUTION_NAME}[onnx]",
                 )
             )
-    elif args.vad == "auditok":
+    elif require_model_runtime and args.vad == "auditok":
         required.append(
             (
                 "auditok.core",
                 "Auditok VAD",
-                "cohere-transcribe-arabic[auditok]",
+                f"{DISTRIBUTION_NAME}[auditok]",
             )
         )
     if args.alignment == "word":
@@ -86,39 +119,40 @@ def preflight_runtime(args: TranscriptionConfig) -> None:
                 (
                     "torchaudio",
                     "word alignment",
-                    "cohere-transcribe-arabic[word]",
+                    f"{DISTRIBUTION_NAME}[word]",
                 ),
                 (
                     "uroman",
                     "word-alignment romanization",
-                    "cohere-transcribe-arabic[word]",
+                    f"{DISTRIBUTION_NAME}[word]",
                 ),
                 (
                     "cohere_transcribe.alignment.alignment_utils",
                     "word alignment span utilities",
-                    "cohere-transcribe-arabic[word]",
+                    f"{DISTRIBUTION_NAME}[word]",
                 ),
                 (
                     "cohere_transcribe.alignment.text_utils",
                     "word alignment text utilities",
-                    "cohere-transcribe-arabic[word]",
+                    f"{DISTRIBUTION_NAME}[word]",
                 ),
             ]
         )
-    if args.audio_backend == "torchcodec":
+    audio_decode_required = require_model_runtime or args.alignment == "word"
+    if audio_decode_required and args.audio_backend == "torchcodec":
         required.append(
             (
                 "torchcodec",
                 "TorchCodec audio decoding",
-                "cohere-transcribe-arabic",
+                DISTRIBUTION_NAME,
             )
         )
-    elif args.audio_backend == "librosa":
+    elif audio_decode_required and args.audio_backend == "librosa":
         required.append(
             (
                 "librosa",
                 "Librosa audio decoding",
-                "cohere-transcribe-arabic",
+                DISTRIBUTION_NAME,
             )
         )
 
@@ -131,7 +165,11 @@ def preflight_runtime(args: TranscriptionConfig) -> None:
                 f"  Install a compatible build with: pip install {package}"
             ) from exc
 
-    if args.vad == "silero" and args.vad_engine in {"torch", "jit"}:
+    if (
+        require_model_runtime
+        and args.vad == "silero"
+        and args.vad_engine in {"torch", "jit"}
+    ):
         from .vad.runtime import SileroBackendUnavailable, packaged_silero_jit_path
 
         try:
@@ -139,20 +177,44 @@ def preflight_runtime(args: TranscriptionConfig) -> None:
         except SileroBackendUnavailable as exc:
             raise SystemExit(
                 f"Silero {SILERO_VERSION} package data is unavailable ({exc}). "
-                "Reinstall cohere-transcribe-arabic."
+                f"Reinstall {DISTRIBUTION_NAME}."
             ) from exc
 
     from packaging.version import Version
 
-    transformers_version = package_version("transformers")
-    if transformers_version is None or Version(transformers_version) != Version(
-        TRANSFORMERS_VERSION
-    ):
-        raise SystemExit(
-            "The optimized Cohere hot path is validated only with "
-            f"transformers=={TRANSFORMERS_VERSION}; "
-            f"found {transformers_version or 'unknown'}"
-        )
+    if require_model_runtime or args.alignment == "word":
+        transformers_version = package_version("transformers")
+        if transformers_version is None or Version(transformers_version) != Version(
+            TRANSFORMERS_VERSION
+        ):
+            raise SystemExit(
+                "The optimized Cohere model paths are validated only with "
+                f"transformers=={TRANSFORMERS_VERSION}; "
+                f"found {transformers_version or 'unknown'}"
+            )
+    if require_model_runtime and model_format.startswith("bitsandbytes-"):
+        bitsandbytes_version = package_version("bitsandbytes")
+        accelerate_version = package_version("accelerate")
+        if bitsandbytes_version is None or Version(bitsandbytes_version) < Version(
+            "0.49.2"
+        ):
+            raise SystemExit(
+                "Saved quantized checkpoints require bitsandbytes>=0.49.2; "
+                f"found {bitsandbytes_version or 'unknown'}"
+            )
+        if accelerate_version is None or Version(accelerate_version) < Version(
+            "1.13.0"
+        ):
+            raise SystemExit(
+                "Saved quantized checkpoints require accelerate>=1.13.0; "
+                f"found {accelerate_version or 'unknown'}"
+            )
+    if require_model_runtime and args.adapter is not None:
+        peft_version = package_version("peft")
+        if peft_version is None or Version(peft_version) < Version("0.19.1"):
+            raise SystemExit(
+                f"LoRA adapters require peft>=0.19.1; found {peft_version or 'unknown'}"
+            )
 
     if args.alignment == "word":
         torch_pair = release_pair(torch.__version__)
@@ -169,6 +231,8 @@ def preflight_runtime(args: TranscriptionConfig) -> None:
                 f"torchaudio {torchaudio_version}"
             )
         preflight_forced_align()
+    if not audio_decode_required:
+        return
     if args.audio_backend in {"auto", "torchcodec"}:
         from .audio.backends import resolve_audio_backend, torchcodec_is_usable
 

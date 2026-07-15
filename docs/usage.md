@@ -12,7 +12,7 @@ Create a virtual environment and install the package:
 python -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
-python -m pip install cohere-transcribe-arabic
+python -m pip install cohere-transcribe
 ```
 
 Automatic decoding prefers TorchCodec, which needs compatible FFmpeg shared libraries from the operating system. The OS package also provides `ffmpeg` and `ffprobe`, which the package uses for fallback decoding and inexpensive duration probes.
@@ -32,19 +32,25 @@ Install only the features you need:
 
 ```bash
 # Auditok energy-based segmentation
-python -m pip install "cohere-transcribe-arabic[auditok]"
+python -m pip install "cohere-transcribe[auditok]"
 
 # Sequence-based ONNX Silero fallback
-python -m pip install "cohere-transcribe-arabic[onnx]"
+python -m pip install "cohere-transcribe[onnx]"
 
 # MMS CTC word alignment
-python -m pip install "cohere-transcribe-arabic[word]"
+python -m pip install "cohere-transcribe[word]"
+
+# Saved bitsandbytes INT8/INT4 checkpoints on CUDA
+python -m pip install "cohere-transcribe[quantized]"
+
+# PEFT LoRA adapters for dense checkpoints
+python -m pip install "cohere-transcribe[adapters]"
 ```
 
 Extras can be combined:
 
 ```bash
-python -m pip install "cohere-transcribe-arabic[auditok,onnx,word]"
+python -m pip install "cohere-transcribe[adapters,auditok,onnx,word]"
 ```
 
 ### Device-Specific PyTorch
@@ -55,14 +61,14 @@ For source development, uv can select a suitable Torch backend:
 
 ```bash
 uv venv --python 3.12
-uv pip install --editable ".[auditok,onnx,word]" --group dev --torch-backend=auto
+uv pip install --editable ".[adapters,auditok,onnx,quantized,word]" --group dev --torch-backend=auto
 ```
 
 The repository's `uv.lock` represents the standard PyPI source-development resolution and is checked by CI for consistency. CI installs its explicit CPU Torch backend from public dependency metadata. Use `uv run --no-sync` after a device-aware installation so uv does not replace the selected Torch build.
 
 ## Model Access
 
-The ASR model is gated. Accept the terms for [CohereLabs/cohere-transcribe-arabic-07-2026](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026), create a Hugging Face read token, and authenticate the same account:
+The default [CohereLabs/cohere-transcribe-arabic-07-2026](https://huggingface.co/CohereLabs/cohere-transcribe-arabic-07-2026) repository is gated. When using that model, accept its terms, create a Hugging Face read token, and authenticate the same account. A public custom checkpoint does not require access to the default repository.
 
 ```bash
 hf auth login
@@ -70,9 +76,99 @@ hf auth login
 
 Set `HF_TOKEN` on non-interactive systems. Set `HF_HOME` when the model cache should use another disk. The first transcription downloads several gigabytes; word alignment downloads an additional model.
 
-The package pins the exact ASR and alignment model revisions used by the validated runtime. This prevents an upstream model update from silently changing output or invalidating resumable state.
+The package pins the exact default ASR and alignment model revisions used by the validated runtime. A selected custom Hub model or adapter branch, tag, or default branch is resolved to an immutable commit before inference. A local model or adapter is loaded directly from its canonical directory and does not use a revision.
 
 Arabic is the default language. Use `--language en` for English audio; the package does not detect language automatically, and one language prompt applies to the complete command. It does not perform speaker diarization. Arabic-English code-switching is accepted as audio input, but output-language consistency is model-dependent and was not validated as a separate capability.
+
+## Model Selection
+
+The runtime supports three native Transformers loading paths:
+
+| Loading path | Installation | Device | Loader behavior |
+|---|---|---|---|
+| Dense Cohere ASR checkpoint | Base package | CUDA, MPS, or CPU code path | Loads native `CohereAsrForConditionalGeneration` weights and applies the optimized Cohere inference path |
+| Saved bitsandbytes INT8 or INT4 checkpoint | `cohere-transcribe[quantized]` | CUDA only | Detects the saved quantization configuration and lets Accelerate place the already-quantized weights |
+| PEFT LoRA adapter over a dense checkpoint | `cohere-transcribe[adapters]` | Base model's supported device | Validates the adapter metadata, safely merges it into the dense base, then applies the optimized Cohere inference path |
+
+The selected Hub repository or local directory must provide a native `cohere_asr` configuration, `CohereAsrProcessor`, and a Transformers safetensors or PyTorch weight entry point. Remote model code is never enabled. ONNX-only ASR, GGUF, and MLX checkpoints are rejected before audio preparation.
+
+### Dense Checkpoints
+
+Use `--model` for another native dense checkpoint. Supplying an immutable commit gives the clearest reproducibility contract, while a branch, tag, or omitted revision is accepted and resolved once before work begins:
+
+```bash
+cohere-transcribe recordings/ \
+  --model owner/cohere-asr-model \
+  --model-revision 0123456789abcdef0123456789abcdef01234567 \
+  --output-dir transcripts/
+```
+
+The default model is the only dense checkpoint covered by the package's full release accuracy and performance baselines. Other compatible dense checkpoints may be fine-tunes with different vocabulary behavior, output length, accuracy, and throughput; compatibility is not a quality endorsement.
+
+### Local Model Directories
+
+Pass an existing model directory directly. Dense, saved bitsandbytes INT8/INT4, and fine-tuned Cohere ASR directories use the same format detection and loader paths as Hub snapshots:
+
+```bash
+cohere-transcribe recordings/ \
+  --model /models/cohere-asr \
+  --output-dir transcripts/
+```
+
+An existing directory always wins over an identically spelled Hub repository. Relative directories are accepted and canonicalized before state planning. Use an explicit path such as `./models/cohere-asr` when a not-yet-existing relative path could also be interpreted as a Hub ID. Existing files and explicit missing paths fail before model loading.
+
+Local sources do not use Hub revisions. Combining a local model with `--model-revision`, or a local adapter with `--adapter-revision`, is a configuration error. In the Python API, a `pathlib.Path` model or adapter is always treated as local and must already be a directory; strings retain the CLI's Hub-or-local interpretation. Transformers and PEFT receive the directory directly, and local model resolution performs no Hub request. Output JSON, profile JSON, returned API provenance, checkpoint contracts, and reusable resource keys use the canonical path with a null revision.
+
+The package deliberately does not hash or monitor local artifacts. Replacing configuration or weights inside the same directory does not invalidate an existing checkpoint and does not refresh a model retained by a live `Transcriber`. After changing files in place, close and recreate the `Transcriber`; that is sufficient when `publication=None`. When publication is enabled, also select a fresh output directory or remove the corresponding hidden ASR checkpoint and manifest before rerunning with CLI `--existing overwrite` or API `PublicationOptions(existing="overwrite")`. Moving to another directory naturally creates another identity.
+
+### Saved Bitsandbytes Checkpoints
+
+Saved bitsandbytes repositories and local directories carry their INT8 or INT4 configuration in `config.json`. Select the source normally; there is no `--int8`, `--int4`, or runtime conversion option:
+
+```bash
+python -m pip install "cohere-transcribe[quantized]"
+
+cohere-transcribe recordings/ \
+  --model NAMAA-Space/cohere-transcribe-arabic-07-2026-int8 \
+  --device cuda \
+  --output-dir transcripts/
+```
+
+`NAMAA-Space/cohere-transcribe-arabic-07-2026-int4` exercises the same path for its saved INT4 checkpoint. The runtime rejects unsupported quantizers, ambiguous INT4/INT8 metadata, and non-CUDA execution before loading model weights. Quantized checkpoints cannot currently be combined with a PEFT adapter.
+
+The measured INT8 and INT4 checkpoints reduced memory but did not improve throughput on the RTX 3060. Use them when model memory or batch capacity is the constraint, then tune batch size for that checkpoint rather than carrying over the dense optimum. See [Alternate Model Checkpoints](performance.md#alternate-model-checkpoints) and [Selected Model Variants](benchmarks.md#selected-model-variants).
+
+### PEFT LoRA Adapters
+
+An adapter must declare `peft_type=LORA` and `task_type=SEQ_2_SEQ_LM`. When the selected base is a Hub repository, the adapter's declared base repository and optional base revision must match. A local base has no comparable Hub identity, so structural PEFT loading and safe merge establish compatibility. The runtime loads the adapter read-only and calls PEFT's safe merge before model transfer and Cohere-specific patching:
+
+```bash
+python -m pip install "cohere-transcribe[adapters]"
+
+cohere-transcribe recordings/ \
+  --model owner/cohere-asr-base \
+  --model-revision 0123456789abcdef0123456789abcdef01234567 \
+  --adapter owner/cohere-asr-lora \
+  --adapter-revision 89abcdef0123456789abcdef0123456789abcdef \
+  --output-dir transcripts/
+```
+
+Safe merging avoids retaining LoRA modules during generation and restores the dense execution shape, but the resulting text and generation time still depend on the adapter. An independent Moroccan evaluation of one public Darija adapter produced severe insertion loops and much worse WER than its base, so every adapter needs in-domain evaluation before use. That result applies to the tested adapter, not to LoRA as a method.
+
+Hub and local sources can be mixed. For example, either the base or adapter can be a local directory:
+
+```bash
+cohere-transcribe recordings/ \
+  --model /models/cohere-asr-base \
+  --adapter owner/cohere-asr-lora \
+  --adapter-revision 89abcdef0123456789abcdef0123456789abcdef
+```
+
+```bash
+cohere-transcribe recordings/ \
+  --model owner/cohere-asr-base \
+  --adapter /models/cohere-asr-lora
+```
 
 ## Recommended Commands
 
@@ -172,7 +268,7 @@ Each `TranscriptionResult` has:
 | `cues` | Rendered subtitle cues for timestamped modes |
 | `outputs` | Published output paths, empty for an in-memory run |
 | `error` | Per-file failure text, otherwise `None` |
-| `provenance` | Decoder, VAD, generation-safety, alignment-fallback, checkpoint, and publication facts |
+| `provenance` | Resolved model/adapter identity, detected model format, decoder, VAD, generation-safety, alignment-fallback, checkpoint, and publication facts |
 
 `TranscriptionRun.successful`, `.failed`, and `.skipped` filter the result tuple. `run.errors` contains run-level failures such as profile publication, and `run.ok` is true only when no file and no run-level operation failed. `run.statistics` contains stage timings, process serialization wait, generation counts, retry counts, peak PyTorch CUDA allocation and reservation measurements, and `real_time_factor_x`, which is successful source duration divided by elapsed time. `requested_options` preserves the API request, while `resolved_options` reports runtime-normalized device, precision, VAD policy, output mode, and formats. Per-file provenance records the decoder and VAD engine that actually completed.
 
@@ -184,6 +280,7 @@ The fields are grouped as follows:
 
 | Area | `TranscriptionOptions` fields |
 |---|---|
+| Model identity | `model`, `model_revision`, `adapter`, `adapter_revision` |
 | Input and runtime | `language`, `text_only`, `recursive`, `device`, `dtype`, `audio_backend`, `audio_memory_gb`, `preprocess_workers`, `pipeline_preparation` |
 | Segmentation | `vad`, `vad_engine`, `vad_batch_size`, `vad_block_frames`, `vad_threads`, `vad_merge`, `min_dur`, `max_dur`, `max_silence`, `energy_threshold`, `vad_threshold`, `min_silence_ms`, `speech_pad_ms` |
 | ASR batching | `batch_size`, `batch_max_size`, `batch_audio_seconds`, `batch_vram_target`, `adaptive_batch`, `pin_memory` |
@@ -214,6 +311,44 @@ options = TranscriptionOptions(
 )
 run = transcribe(["interview.wav", "recordings/"], options=options)
 ```
+
+The same fields select all three loading paths. For a saved quantized checkpoint, set only `model` and optionally `model_revision`; format detection is automatic. For an adapter, set its dense `model` plus `adapter` and optionally `adapter_revision`:
+
+```python
+from pathlib import Path
+
+from cohere_transcribe import TranscriptionOptions, transcribe
+
+quantized = transcribe(
+    "recordings/",
+    options=TranscriptionOptions(
+        model="NAMAA-Space/cohere-transcribe-arabic-07-2026-int4",
+        device="cuda",
+        text_only=True,
+    ),
+)
+
+adapted = transcribe(
+    "recordings/",
+    options=TranscriptionOptions(
+        model="owner/cohere-asr-base",
+        model_revision="0123456789abcdef0123456789abcdef01234567",
+        adapter="owner/cohere-asr-lora",
+        adapter_revision="89abcdef0123456789abcdef0123456789abcdef",
+    ),
+)
+
+local = transcribe(
+    "recordings/",
+    options=TranscriptionOptions(
+        model=Path("/models/cohere-asr"),
+        adapter=Path("/models/cohere-asr-lora"),
+        device="cuda",
+    ),
+)
+```
+
+`requested_options` retains the references supplied by an API caller, including `Path` objects. `resolved_options` contains immutable Hub commits or canonical local paths with null revisions. Per-file provenance exposes the resolved identity and detected format; JSON outputs and profiles additionally retain the complete saved quantization configuration. Checkpoint and manifest contract keys bind the same configuration without duplicating it in their payloads.
 
 `PublicationOptions.formats=None` uses the same mode-sensitive defaults as the CLI: TXT for text-only output and TXT/SRT/VTT for timestamped output. `output_dir=None` publishes beside each source. `existing` accepts `error`, `overwrite`, or `skip`; `profile_json` enables the separately atomic run profile.
 
@@ -259,7 +394,7 @@ with Transcriber(options) as transcriber:
     second_run = transcriber.transcribe(["second.wav", "third.wav"])
 ```
 
-Construction is lightweight, and the ASR model loads on the first call that needs inference. Compatible text-only and segment-timed calls reuse the loaded model. The package retains at most one ASR model per process, so switching sessions or running word alignment can require the next ASR call to reload it. `close()` releases retained resources and is idempotent; transcription after closing raises `TranscriberClosedError`.
+Construction is lightweight, and the ASR model loads on the first call that needs inference. A session configured for text-only or segment timing reuses the loaded model across compatible calls; its options do not change between calls. The package retains at most one ASR model per process, so switching sessions or running word alignment can require the next ASR call to reload it. `close()` releases retained resources and is idempotent; transcription after closing raises `TranscriberClosedError`.
 
 ### Progress and Concurrency
 
@@ -416,6 +551,23 @@ Also verify access to the pinned processor and configuration:
 ```bash
 cohere-transcribe-doctor --model-access
 ```
+
+Validate a custom model's native config and processor, immutable identity, format, and optional dependencies without loading its weights:
+
+```bash
+cohere-transcribe-doctor \
+  --model NAMAA-Space/cohere-transcribe-arabic-07-2026-int8
+```
+
+Validate a model/adapter pair the same way:
+
+```bash
+cohere-transcribe-doctor \
+  --model owner/cohere-asr-base \
+  --adapter owner/cohere-asr-lora
+```
+
+Any model or adapter selection option implies `--model-access`; the explicit flag remains useful for checking the default model.
 
 Validate word-alignment dependencies and pinned model access after installing its extra:
 

@@ -3,8 +3,8 @@ requires = ["uv_build>=0.11.28,<0.12"]
 build-backend = "uv_build"
 
 [project]
-name = "cohere-transcribe-arabic"
-version = "0.1.0"
+name = "cohere-transcribe"
+version = "0.1.1"
 description = "Unofficial high-throughput batch inference for Cohere Arabic/English ASR"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -36,17 +36,19 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+adapters = ["peft>=0.19.1"]
 auditok = ["auditok>=0.4.2,<0.5"]
 onnx = [
   "onnxruntime>=1.16.1,<1.24; python_version < '3.11'",
   "onnxruntime>=1.16.1; python_version >= '3.11'",
 ]
+quantized = ["accelerate>=1.13.0", "bitsandbytes>=0.49.2"]
 word = ["torchaudio==2.11.0", "uroman==1.3.1.1"]
 
 [project.urls]
-Documentation = "https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference#readme"
-Issues = "https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference/issues"
-Repository = "https://github.com/AliOsm/cohere-transcribe-arabic-batch-inference"
+Documentation = "https://github.com/AliOsm/cohere-transcribe#readme"
+Issues = "https://github.com/AliOsm/cohere-transcribe/issues"
+Repository = "https://github.com/AliOsm/cohere-transcribe"
 
 [project.scripts]
 cohere-transcribe = "cohere_transcribe.cli:cli"

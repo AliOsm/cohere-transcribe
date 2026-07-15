@@ -122,6 +122,11 @@ def _result_from_job(job: AudioJob) -> TranscriptionResult:
         outputs=outputs,
         error=job.error,
         provenance=TranscriptionProvenance(
+            model_id=job.model_id,
+            model_revision=job.model_revision,
+            model_format=job.model_format,
+            adapter_id=job.adapter_id,
+            adapter_revision=job.adapter_revision,
             decode_backend=job.decode_backend,
             decode_fallback_reason=job.decode_fallback_reason,
             vad_engine_requested=job.vad_engine_requested,

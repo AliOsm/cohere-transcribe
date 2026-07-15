@@ -271,8 +271,24 @@ def transcribe_all(
         ) as executor:
             pending = submit_group(executor, source_groups[0])
             started = time.perf_counter()
+            model_revision = args.model_revision
             processor, model, _loaded_now = model_resources.acquire_asr(
-                device, dtype, loader=load_asr
+                device,
+                dtype,
+                model_id=args.model,
+                model_revision=model_revision,
+                model_format=args.model_format or "dense",
+                adapter_id=args.adapter,
+                adapter_revision=args.adapter_revision,
+                loader=lambda load_device, load_dtype: load_asr(
+                    load_device,
+                    load_dtype,
+                    args.model,
+                    model_revision,
+                    args.model_format or "dense",
+                    args.adapter,
+                    args.adapter_revision,
+                ),
             )
             max_clip = validate_processor_single_row_window(processor, args.max_dur)
             info(f"processor single-row audio limit: {max_clip:g}s")

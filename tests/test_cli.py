@@ -13,6 +13,7 @@ from cohere_transcribe.cancellation import (
     cancellation_requested,
     request_cancellation,
 )
+from cohere_transcribe.model_identity import ResolvedModelIdentity
 from cohere_transcribe.output import pipeline as output_pipeline
 from cohere_transcribe.pipeline import transcription as transcription_pipeline
 
@@ -67,7 +68,9 @@ def test_multi_file_cli_publishes_complete_outputs(
             job.vad_engine_actual = "none"
         output_pipeline.write_segment_timed_outputs(jobs, args)
 
-    monkeypatch.setattr(cli, "preflight_runtime", lambda _args: None)
+    monkeypatch.setattr(
+        cli, "preflight_runtime", lambda _args, _require_model_runtime: None
+    )
     monkeypatch.setattr(device, "pick_device", lambda _requested: "cpu")
     monkeypatch.setattr(output_pipeline, "write_segment_timed_outputs", track_outputs)
     monkeypatch.setattr(transcription_pipeline, "transcribe_all", fake_transcribe_all)
@@ -124,6 +127,50 @@ def test_cli_builds_checkpoint_contract_from_runtime_and_requested_vad_policy(
         "requested": ("auto", "auto", "auto"),
         "contract": ("cpu", "fp32", "auto"),
     }
+
+
+def test_cli_resolves_a_symbolic_model_revision_before_building_contracts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "clip.wav"
+    resolved_commit = "7" * 40
+    seen: list[tuple[str, str | None, str | None]] = []
+
+    monkeypatch.setattr(device, "pick_device", lambda _requested: "cpu")
+    monkeypatch.setattr(
+        "cohere_transcribe.runtime.engine.resolve_model_identity",
+        lambda model_id, revision, adapter, adapter_revision, **_kwargs: (
+            ResolvedModelIdentity(
+                model_id=model_id,
+                model_revision=resolved_commit,
+                model_format="dense",
+            )
+            if (model_id, revision, adapter, adapter_revision)
+            == ("owner/model", "release", None, None)
+            else pytest.fail("unexpected model reference")
+        ),
+    )
+
+    def fake_build_jobs(args, *, contract_args=None):
+        assert contract_args is not None
+        seen.append((args.model, args.model_revision, contract_args.model_revision))
+        return []
+
+    monkeypatch.setattr(inputs, "build_jobs", fake_build_jobs)
+
+    assert (
+        cli.main(
+            [
+                str(source),
+                "--model",
+                "owner/model",
+                "--model-revision",
+                "release",
+            ]
+        )
+        == 0
+    )
+    assert seen == [("owner/model", resolved_commit, resolved_commit)]
 
 
 @pytest.mark.parametrize("requested", ["bf16", "fp16", "fp32"])

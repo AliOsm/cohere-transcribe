@@ -30,6 +30,7 @@ from ..api.types import (
 )
 from ..cancellation import TerminationRequested, reset_cancellation
 from ..config import config_from_options, validate_args
+from ..model_identity import resolve_model_identity, verify_model_weight_artifacts
 from ..models import (
     INDENT,
     RunStats,
@@ -37,6 +38,8 @@ from ..models import (
     default_output_mode,
     fmt_dur,
     info,
+    is_model_access_error,
+    model_access_message,
 )
 from ..output import pipeline as output_pipeline
 from ..pipeline import transcription as transcription_pipeline
@@ -129,7 +132,7 @@ def execute(
     runtime_import_seconds: float = 0.0,
     serialization_wait_seconds: float = 0.0,
     started: float | None = None,
-    preflight: Callable[[TranscriptionConfig], None] | None = None,
+    preflight: Callable[[TranscriptionConfig, bool], None] | None = None,
 ) -> TranscriptionRun:
     """Execute one validated configuration through the shared offline pipeline."""
     started = time.perf_counter() if started is None else started
@@ -143,6 +146,33 @@ def execute(
         requested_dtype,
         requested_vad_engine,
     ) = _resolve_precision(args)
+    try:
+        model_identity = resolve_model_identity(
+            args.model,
+            args.model_revision,
+            args.adapter,
+            args.adapter_revision,
+            verify_weight_artifacts=False,
+        )
+        args.model = model_identity.model_id
+        args.model_revision = model_identity.model_revision
+        args.model_format = model_identity.model_format
+        args.model_quantization = model_identity.quantization_config
+        args.adapter = model_identity.adapter_id
+        args.adapter_revision = model_identity.adapter_revision
+    except Exception as exc:
+        if is_model_access_error(exc):
+            restricted_id = (
+                args.adapter
+                if args.adapter is not None and args.adapter in str(exc)
+                else args.model
+            )
+            raise TranscriptionRuntimeError(
+                model_access_message(exc, model_id=restricted_id)
+            ) from exc
+        raise TranscriptionRuntimeError(
+            f"Cannot resolve ASR model or adapter: {type(exc).__name__}: {exc}"
+        ) from exc
     contract_args = replace(args, device=device, dtype=resolved_dtype)
     try:
         if publication_enabled:
@@ -174,6 +204,9 @@ def execute(
         else requested_vad_engine
     )
     runnable_jobs = [job for job in jobs if not job.skipped]
+    model_inference_required = any(
+        not job.asr_checkpoint_loaded for job in runnable_jobs
+    )
     stats = RunStats(
         runtime_import_seconds=runtime_import_seconds,
         serialization_wait_seconds=serialization_wait_seconds,
@@ -210,9 +243,24 @@ def execute(
     except SystemExit as exc:
         _raise_translated(TranscriptionInputError, exc)
     try:
-        (preflight or preflight_runtime)(args)
+        if model_inference_required:
+            verify_model_weight_artifacts(model_identity)
+        (preflight or preflight_runtime)(args, model_inference_required)
     except SystemExit as exc:
         _raise_translated(TranscriptionRuntimeError, exc)
+    except Exception as exc:
+        if is_model_access_error(exc):
+            restricted_id = (
+                args.adapter
+                if args.adapter is not None and args.adapter in str(exc)
+                else args.model
+            )
+            raise TranscriptionRuntimeError(
+                model_access_message(exc, model_id=restricted_id)
+            ) from exc
+        raise TranscriptionRuntimeError(
+            f"Cannot validate ASR model weights: {type(exc).__name__}: {exc}"
+        ) from exc
     stats.input_validation_seconds = max(
         0.0,
         time.perf_counter()

@@ -11,11 +11,13 @@ from numbers import Real
 
 from ._version import __version__
 from .api.types import PublicationOptions, TranscriptionOptions
+from .model_identity import resolve_local_directory
 from .models import (
     ASR_FIXED_MIN_S,
     DEFAULT_TORCH_VAD_BATCH_SIZE,
     DEFAULT_TORCH_VAD_BLOCK_FRAMES,
     MAX_TORCH_VAD_PADDED_FRAMES,
+    MODEL_ID,
     TranscriptionConfig,
 )
 
@@ -60,6 +62,23 @@ REAL_OPTIONS = (
 )
 
 
+def _model_option_reference(value: object, *, description: str) -> str:
+    """Preserve string Hub semantics while treating PathLike values as local."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bytes) or not isinstance(value, os.PathLike):
+        raise TypeError(
+            f"{description} must be a string or a path-like local directory"
+        )
+    reference = os.fspath(value)
+    if isinstance(reference, bytes):
+        raise TypeError(f"{description} path must resolve to text, not bytes")
+    local_directory = resolve_local_directory(reference, description=description)
+    if local_directory is None:
+        raise ValueError(f"{description} directory {reference!r} does not exist")
+    return local_directory
+
+
 def config_from_options(
     audio: Sequence[str], options: TranscriptionOptions
 ) -> TranscriptionConfig:
@@ -70,6 +89,11 @@ def config_from_options(
         item.name for item in fields(TranscriptionOptions) if item.name != "publication"
     }
     values = {name: getattr(options, name) for name in option_names}
+    values["model"] = _model_option_reference(values["model"], description="Model")
+    if values["adapter"] is not None:
+        values["adapter"] = _model_option_reference(
+            values["adapter"], description="Adapter"
+        )
     publication = options.publication
     return TranscriptionConfig(
         audio=list(audio),
@@ -138,6 +162,32 @@ def parse_args(argv: Sequence[str] | None = None) -> TranscriptionConfig:
         "audio",
         nargs="+",
         help="One or more audio files or directories.",
+    )
+    parser.add_argument(
+        "--model",
+        default=MODEL_ID,
+        help=(
+            "Hugging Face repository or local directory containing a native "
+            "Transformers Cohere ASR model."
+        ),
+    )
+    parser.add_argument(
+        "--model-revision",
+        default=None,
+        help=(
+            "Hub model commit, tag, or branch. The package default uses its "
+            "evaluated commit; local directories do not use revisions."
+        ),
+    )
+    parser.add_argument(
+        "--adapter",
+        default=None,
+        help="Optional Hub repository or local LoRA adapter directory to merge.",
+    )
+    parser.add_argument(
+        "--adapter-revision",
+        default=None,
+        help="Hub adapter commit, tag, or branch; local directories do not use revisions.",
     )
     parser.add_argument(
         "--language",
@@ -435,7 +485,71 @@ def parse_args(argv: Sequence[str] | None = None) -> TranscriptionConfig:
     return TranscriptionConfig(**vars(namespace))
 
 
+def _validate_model_reference(value: object, *, option: str, description: str) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        raise SystemExit(
+            f"{option} must be a non-empty Hugging Face repository ID or local directory"
+        )
+    if value != value.strip():
+        raise SystemExit(f"{option} must not have leading or trailing whitespace")
+    try:
+        local_directory = resolve_local_directory(value, description=description)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    if local_directory is not None:
+        return True
+    try:
+        from huggingface_hub.utils import HFValidationError, validate_repo_id
+
+        validate_repo_id(value)
+    except HFValidationError as exc:
+        raise SystemExit(
+            f"{option} must be a valid Hugging Face repository ID or local "
+            f"directory: {exc}"
+        ) from exc
+    return False
+
+
 def validate_args(args: TranscriptionConfig) -> None:
+    model_is_local = False
+    if hasattr(args, "model"):
+        model_is_local = _validate_model_reference(
+            args.model, option="--model", description="Model"
+        )
+    if (
+        hasattr(args, "model_revision")
+        and args.model_revision is not None
+        and (
+            not isinstance(args.model_revision, str)
+            or not args.model_revision.strip()
+            or args.model_revision != args.model_revision.strip()
+        )
+    ):
+        raise SystemExit(
+            "--model-revision must be a non-empty revision without surrounding whitespace"
+        )
+    if model_is_local and getattr(args, "model_revision", None) is not None:
+        raise SystemExit("--model-revision cannot be used with a local model directory")
+    adapter_is_local = False
+    if hasattr(args, "adapter") and args.adapter is not None:
+        adapter_is_local = _validate_model_reference(
+            args.adapter, option="--adapter", description="Adapter"
+        )
+    if hasattr(args, "adapter_revision") and args.adapter_revision is not None:
+        if getattr(args, "adapter", None) is None:
+            raise SystemExit("--adapter-revision requires --adapter")
+        if (
+            not isinstance(args.adapter_revision, str)
+            or not args.adapter_revision.strip()
+            or args.adapter_revision != args.adapter_revision.strip()
+        ):
+            raise SystemExit(
+                "--adapter-revision must be a non-empty revision without surrounding whitespace"
+            )
+    if adapter_is_local and getattr(args, "adapter_revision", None) is not None:
+        raise SystemExit(
+            "--adapter-revision cannot be used with a local adapter directory"
+        )
     boolean_options = (
         "text_only",
         "recursive",

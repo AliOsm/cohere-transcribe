@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import asdict
 
@@ -15,11 +16,14 @@ from cohere_transcribe.models import (
     DEFAULT_TORCH_VAD_BATCH_SIZE,
     DEFAULT_TORCH_VAD_BLOCK_FRAMES,
     MAX_TORCH_VAD_PADDED_FRAMES,
+    MODEL_ID,
 )
 
 AUDIO = "audio.wav"
 
 MAIN_OPTIONS = {
+    "--adapter",
+    "--adapter-revision",
     "--adaptive-batch",
     "--align-batch-size",
     "--align-dtype",
@@ -46,6 +50,8 @@ MAIN_OPTIONS = {
     "--max-silence",
     "--min-dur",
     "--min-silence-ms",
+    "--model",
+    "--model-revision",
     "--no-adaptive-batch",
     "--no-pin-memory",
     "--no-pipeline-preparation",
@@ -73,10 +79,14 @@ MAIN_OPTIONS = {
 }
 
 DOCTOR_OPTIONS = {
+    "--adapter",
+    "--adapter-revision",
     "--audio-backend",
     "--help",
     "--mode",
     "--model-access",
+    "--model",
+    "--model-revision",
 }
 
 
@@ -136,6 +146,10 @@ def test_main_defaults_are_an_explicit_contract() -> None:
 
     assert asdict(args) == {
         "audio": [AUDIO],
+        "model": MODEL_ID,
+        "model_revision": None,
+        "adapter": None,
+        "adapter_revision": None,
         "language": "ar",
         "formats": ["txt", "srt", "vtt"],
         "text_only": False,
@@ -178,6 +192,8 @@ def test_main_defaults_are_an_explicit_contract() -> None:
         "max_cue_dur": 6.0,
         "max_gap": 0.6,
         "profile_json": None,
+        "model_format": None,
+        "model_quantization": None,
     }
 
 
@@ -192,6 +208,29 @@ def test_main_accepts_multiple_inputs_and_freeform_output_paths() -> None:
     assert args.audio == [AUDIO, "second.flac"]
     assert args.output_dir == "nested outputs"
     assert args.profile_json == "profiles/run.json"
+
+
+def test_main_accepts_a_hugging_face_model_and_symbolic_revision() -> None:
+    args = validated(
+        "--model",
+        "owner/cohere-finetune",
+        "--model-revision",
+        "release/2026-07",
+    )
+    assert args.model == "owner/cohere-finetune"
+    assert args.model_revision == "release/2026-07"
+
+
+@pytest.mark.parametrize("model", ["", "local/path/model", "owner /model"])
+def test_main_rejects_invalid_hugging_face_model_ids(model: str) -> None:
+    with pytest.raises(SystemExit, match="model"):
+        validated("--model", model)
+
+
+@pytest.mark.parametrize("revision", ["", " release", "release "])
+def test_main_rejects_invalid_model_revisions(revision: str) -> None:
+    with pytest.raises(SystemExit, match="model-revision"):
+        validated("--model-revision", revision)
 
 
 def test_main_requires_input_and_rejects_unknown_options() -> None:
@@ -704,6 +743,10 @@ def test_doctor_defaults_are_an_explicit_contract() -> None:
     assert vars(doctor.parse_args([])) == {
         "mode": "segment",
         "model_access": False,
+        "model": MODEL_ID,
+        "model_revision": None,
+        "adapter": None,
+        "adapter_revision": None,
         "audio_backend": "auto",
     }
 
@@ -726,6 +769,32 @@ def test_every_doctor_choice_and_boolean_form_is_accepted(
     )
 
 
+def test_doctor_accepts_a_selected_model_reference() -> None:
+    args = doctor.parse_args(
+        ["--model", "owner/model", "--model-revision", "candidate"]
+    )
+    assert (args.model, args.model_revision) == ("owner/model", "candidate")
+
+
+def test_doctor_selected_model_implies_model_access(monkeypatch, capsys) -> None:
+    calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(doctor, "validate_files", lambda _results: None)
+    monkeypatch.setattr(doctor, "validate_common_runtime", lambda _results: object())
+    monkeypatch.setattr(doctor, "validate_silero", lambda *_args: None)
+    monkeypatch.setattr(doctor, "report_optional_runtime", lambda *_args: None)
+    monkeypatch.setattr(
+        doctor,
+        "validate_model_access",
+        lambda _results, **kwargs: calls.append(
+            (kwargs["model_id"], kwargs["model_revision"])
+        ),
+    )
+
+    assert doctor.main(["--model", "owner/model", "--model-revision", "release"]) == 0
+    assert calls == [("owner/model", "release")]
+    capsys.readouterr()
+
+
 @pytest.mark.parametrize("option", ["--mode", "--audio-backend"])
 def test_doctor_choices_reject_unknown_values(option: str) -> None:
     with pytest.raises(SystemExit):
@@ -742,6 +811,139 @@ def test_doctor_rejects_unknown_options_and_positional_arguments() -> None:
         doctor.parse_args(["--not-an-option"])
     with pytest.raises(SystemExit):
         doctor.parse_args(["unexpected-positional"])
+
+
+def test_doctor_rejects_quantized_model_without_cuda(monkeypatch, capsys) -> None:
+    from types import SimpleNamespace
+
+    from cohere_transcribe.doctor_support import Results
+    from cohere_transcribe.model_identity import ResolvedModelIdentity
+
+    monkeypatch.setattr(
+        doctor,
+        "resolve_model_identity",
+        lambda *_args: ResolvedModelIdentity(
+            model_id="owner/int8",
+            model_revision="1" * 40,
+            model_format="bitsandbytes-int8",
+            quantization_config={
+                "quant_method": "bitsandbytes",
+                "load_in_8bit": True,
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        "cohere_transcribe.asr.model.load_asr_config_and_processor",
+        lambda *_args: (
+            object(),
+            SimpleNamespace(feature_extractor=SimpleNamespace(max_audio_clip_s=35)),
+        ),
+    )
+    monkeypatch.setattr(
+        doctor,
+        "package_version",
+        {"accelerate": "1.13.0", "bitsandbytes": "0.49.2"}.get,
+    )
+    monkeypatch.setattr(doctor, "import_required", lambda *_args: object())
+    results = Results()
+
+    doctor.validate_model_access(
+        results,
+        include_aligner=False,
+        torch_runtime=SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: False)),
+        model_id="owner/int8",
+    )
+
+    assert results.failures == 1
+    assert "requires an available CUDA device" in capsys.readouterr().out
+
+
+def test_doctor_reports_a_local_model_without_a_none_revision(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    from types import SimpleNamespace
+
+    from cohere_transcribe.doctor_support import Results
+
+    model = tmp_path / "model"
+    model.mkdir()
+    (model / "config.json").write_text(
+        json.dumps({"model_type": "cohere_asr"}), encoding="utf-8"
+    )
+    (model / "model.safetensors").write_bytes(b"fixture")
+    seen: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        "cohere_transcribe.asr.model.load_asr_config_and_processor",
+        lambda model_id, revision: (
+            seen.append((model_id, revision)) or object(),
+            SimpleNamespace(feature_extractor=SimpleNamespace(max_audio_clip_s=35)),
+        ),
+    )
+    results = Results()
+
+    doctor.validate_model_access(
+        results,
+        include_aligner=False,
+        model_id=str(model),
+    )
+
+    output = capsys.readouterr().out
+    assert results.failures == 0
+    assert seen == [(str(model.resolve()), None)]
+    assert f"ASR processor {model.resolve()} (dense) accessible" in output
+    assert "@None" not in output
+
+
+def test_doctor_does_not_report_a_quantized_runtime_after_import_failure(
+    monkeypatch, capsys
+) -> None:
+    from types import SimpleNamespace
+
+    from cohere_transcribe.doctor_support import Results
+    from cohere_transcribe.model_identity import ResolvedModelIdentity
+
+    monkeypatch.setattr(
+        doctor,
+        "resolve_model_identity",
+        lambda *_args: ResolvedModelIdentity(
+            model_id="owner/int8",
+            model_revision="1" * 40,
+            model_format="bitsandbytes-int8",
+        ),
+    )
+    monkeypatch.setattr(
+        "cohere_transcribe.asr.model.load_asr_config_and_processor",
+        lambda *_args: (
+            object(),
+            SimpleNamespace(feature_extractor=SimpleNamespace(max_audio_clip_s=35)),
+        ),
+    )
+
+    def import_runtime(results, module, _feature):
+        if module == "bitsandbytes":
+            results.fail("quantized model inference: cannot import 'bitsandbytes'")
+            return None
+        return object()
+
+    monkeypatch.setattr(doctor, "import_required", import_runtime)
+    monkeypatch.setattr(
+        doctor,
+        "package_version",
+        {"accelerate": "1.13.0", "bitsandbytes": "0.49.2"}.get,
+    )
+    results = Results()
+
+    doctor.validate_model_access(
+        results,
+        include_aligner=False,
+        torch_runtime=SimpleNamespace(cuda=SimpleNamespace(is_available=lambda: True)),
+        model_id="owner/int8",
+    )
+
+    output = capsys.readouterr().out
+    assert results.failures == 1
+    assert "cannot import 'bitsandbytes'" in output
+    assert "quantized runtime: accelerate" not in output
 
 
 def test_doctor_main_routes_selected_features(monkeypatch, capsys) -> None:
@@ -772,7 +974,9 @@ def test_doctor_main_routes_selected_features(monkeypatch, capsys) -> None:
     monkeypatch.setattr(
         doctor,
         "validate_model_access",
-        lambda results, include_aligner: calls.append(("access", include_aligner)),
+        lambda results, include_aligner, **kwargs: calls.append(
+            ("access", include_aligner, kwargs)
+        ),
     )
 
     assert (
@@ -793,6 +997,16 @@ def test_doctor_main_routes_selected_features(monkeypatch, capsys) -> None:
         ("silero", sentinel_torch),
         ("word", sentinel_torch),
         ("backend", "librosa"),
-        ("access", True),
+        (
+            "access",
+            True,
+            {
+                "torch_runtime": sentinel_torch,
+                "model_id": MODEL_ID,
+                "model_revision": None,
+                "adapter_id": None,
+                "adapter_revision": None,
+            },
+        ),
     ]
     assert "Validation passed for word mode" in capsys.readouterr().out

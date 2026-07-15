@@ -107,7 +107,7 @@ def test_missing_packaged_jit_asset_has_reinstall_guidance(
 
     message = str(raised.value)
     assert "Silero 6.2.1 package data is unavailable (asset is missing)" in message
-    assert "Reinstall cohere-transcribe-arabic" in message
+    assert "Reinstall cohere-transcribe" in message
 
 
 def test_torch_and_torchaudio_release_mismatch_fails_before_alignment_smoke(

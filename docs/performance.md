@@ -1,6 +1,6 @@
 # Performance
 
-This page records runtime evidence for the v0.1.0 `cohere-transcribe` CLI and the research that determined its defaults. It separates installed-wheel measurements from retained experiments produced by earlier single-file and evaluation harnesses. Retained results remain useful for decisions, but they are not v0.1.0 package baselines.
+This page records the v0.1.0 installed-wheel runtime baselines, the v0.1.1 model-selection validation, and the research that determined the package defaults. It separates installed-wheel measurements from retained experiments produced by earlier single-file and evaluation harnesses. Retained results remain useful for decisions, but they are not installed-wheel package baselines unless labeled as such.
 
 See [Accuracy Benchmarks](benchmarks.md) for human-reference WER/CER, configuration sensitivity, timestamp limitations, and comparison with the official model-card results. Transcript or subtitle hash equality demonstrates implementation stability, not ASR accuracy.
 
@@ -8,7 +8,7 @@ See [Accuracy Benchmarks](benchmarks.md) for human-reference WER/CER, configurat
 
 The authoritative release baselines are repeated fresh-process runs of the installed wheel. External wall time includes process startup, imports, model loading, audio decoding, VAD, ASR, rendering, checkpoint and output publication, and process shutdown. Profile elapsed time starts inside the application and is therefore lower than external wall time. RTFx is decoded source duration divided by wall time, so higher values are faster.
 
-Unless a row explicitly says otherwise, the validated CUDA path used Arabic decoding, BF16 ASR, static length-sorted batch 24, adaptive growth disabled, pinned transfers disabled, and warm local model downloads.
+Unless a row explicitly says otherwise, the validated CUDA path used Arabic decoding, BF16 ASR, static length-sorted batch 24, adaptive growth disabled, pinned transfers disabled, and a warm Hugging Face model cache.
 
 Retained research is labeled because it used an earlier entry point, a different dependency set, a component-only harness, a single observation, or a different segmentation policy. Values with different timing boundaries or ASR inputs must not be compared as a pure implementation speedup.
 
@@ -39,15 +39,17 @@ CPU selection and dependency handling are tested, but full-model CPU inference a
 | Workload | Configuration | External runs | Median | External RTFx | Work performed |
 |---|---|---|---:|---:|---|
 | Long-form Arabic grammar lecture, 4,160.679 seconds | TorchCodec, packed CPU PyTorch Silero with merge, segment timing, batch 24 | 32.27s, 32.27s, 32.20s | 32.27s | 128.9x | 182 processor rows, 8 generation batches, 28,277 generated tokens |
-| Balanced 500 files, 5,035.715 seconds | Automatic decoding, packed CPU PyTorch Silero without merge, text only, batch 24 | 39.27s, 39.37s, 38.89s | 39.27s | 128.2x | 729 processor rows, 33 generation batches, 21,587 generated tokens |
+| Balanced 500 files, 5,035.715 decoded seconds | Automatic decoding, packed CPU PyTorch Silero without merge, text only, batch 24 | 39.27s, 39.37s, 38.89s | 39.27s | 128.2x | 729 processor rows, 33 generation batches, 21,587 generated tokens |
 
 All three long-form runs produced the same TXT, SRT, and VTT hashes. Every balanced-corpus run matched all 500 retained transcripts. Automatic decoding used TorchCodec for 499 files and recovered one WAV that TorchCodec could not decode through the available FFmpeg executable.
 
 The long-form run reached 6.06 GiB peak CUDA allocation, 6.10 GiB peak CUDA reservation, and approximately 5.5 GiB maximum process RSS. These are process measurements on the validated host, not minimum system requirements.
 
-The balanced corpus contains 100 files each from Casablanca, Common Voice 18 Arabic, FLEURS `ar_eg`, a Quran Classical Arabic proxy, and SADA22. The files total 1.399 hours and exercise short heterogeneous batch input rather than one continuous recording.
+The balanced corpus contains 100 files each from Casablanca, Common Voice 18 Arabic, FLEURS `ar_eg`, a Quran Classical Arabic proxy, and SADA22. Package profiles total their decoded sample lengths as 5,035.715 seconds. The component benchmark manifest reports 5,032.699 seconds of source metadata for the same 500-file selection; the 3.016-second accounting difference does not identify another corpus. These files exercise short heterogeneous batch input rather than one continuous recording.
 
 A rebuilt v0.1.0 wheel completed later regression smokes in 32.42 seconds for the long-form workload and 38.52 seconds for the balanced 500. Output hashes, all 500 transcripts, processor-row counts, generation-batch counts, and generated-token counts matched the retained baselines. These are single observations; the repeated medians above remain the performance baselines.
+
+After adding custom dense, saved bitsandbytes, and adapter model selection, the unchanged default-model source path completed the same 500-file package workload in 39.16 seconds externally and 38.153 seconds internally. All 500 TXT files were byte-identical to the retained release output, with the same 729 processor rows, 33 generation batches, 21,587 output tokens, and 6.05 GiB peak CUDA allocation. This single regression observation matches the 39.27-second release median and shows no default-path performance or transcript regression; it does not replace the installed-wheel baseline.
 
 ## Output and Alignment Modes
 
@@ -186,6 +188,70 @@ The guard waits for at least 96 generated tokens and requires four consecutive c
 
 An all-segment execution probe on the long-form lecture measured 64.64 seconds with chronological full padding and 26.61 seconds after duration sorting; generation fell from 52.20 to 22.55 seconds. CPU feature lookahead then overlaps feature construction with GPU generation in the package. GPU feature extraction, regional `torch.compile`, and a custom graph path did not provide a stable output-preserving end-to-end gain on the dynamic workload.
 
+## Alternate Model Checkpoints
+
+The package accepts native dense Cohere ASR checkpoints, saved bitsandbytes INT8/INT4 checkpoints, and LoRA adapters over a dense base. Loader compatibility does not imply that a checkpoint preserves the default model's throughput or recognition quality. Hub selections resolve to immutable commits; local selections use canonical paths with null revisions. Outputs and profiles expose that identity directly, while checkpoint and reusable-resource contracts bind it to prevent reuse across different resolved sources.
+
+The following comparisons used the balanced-500 manifest probe: the same 500-file selection as the package baseline, with 100 clips each from Casablanca, Common Voice 18 Arabic, FLEURS `ar_eg`, the Quran Classical Arabic proxy, and SADA22. Its source metadata totals 5,032.699 seconds, while package profiles use the 5,035.715-second decoded total explained above. The evaluator retained each complete clip, used BF16 compute and length-sorted batches, and excluded model loading, VAD, alignment, and output publication. These component measurements therefore compare model execution and transcript behavior; they are not replacements for the installed-wheel baselines above.
+
+### Saved Bitsandbytes Checkpoints
+
+The saved-checkpoint runs used Accelerate 1.13.0 and bitsandbytes 0.49.2 with the validated PyTorch and Transformers environment. INT8 was `NAMAA-Space/cohere-transcribe-arabic-07-2026-int8@88a45a10a7afb54aeeeb9d7a50f88334886f5e74`; INT4 was `NAMAA-Space/cohere-transcribe-arabic-07-2026-int4@b22c9187ea9993fb41f741b442abdf86fb89c6fa`.
+
+| Checkpoint | Batch | Wall | Generation | Wall RTFx | Peak allocated | Lexical WER | Lexical CER |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Dense BF16 default | 24 | 32.460s | 27.663s | 155.04x | 9.426 GiB | 22.9551% | 11.5812% |
+| Saved INT8 | 24 | 70.673s | 65.715s | 71.21x | 7.761 GiB | 22.9551% | 11.5782% |
+| Saved INT8 | 48 | 56.239s | 51.170s | 89.49x | 10.331 GiB | 22.9396% | 11.5121% |
+| Saved INT4 | 24 | 43.658s | 38.758s | 115.27x | 6.950 GiB | 22.9862% | 11.3440% |
+| Saved INT4 | 48 | 37.511s | 32.402s | 134.16x | 9.520 GiB | 23.0327% | 11.3380% |
+| Saved INT4 | 64 | 36.360s | 31.012s | 138.41x | 11.233 GiB | 22.9241% | 11.2449% |
+
+At batch 24, INT8 saved 1.665 GiB, or 17.7%, of peak allocation but took 2.18 times the dense wall time. INT4 saved 2.476 GiB, or 26.3%, and took 1.35 times the dense wall time. Their static model footprints were 3.848 GiB for dense BF16, 2.179 GiB for INT8, and 1.344 GiB for INT4. Warm-cache model loading took 5.377, 7.120, and 6.904 seconds respectively in the retained probe.
+
+Bitsandbytes reported that the tested INT8 linear path casts BF16 activations to FP16. That warning is expected for this saved checkpoint and is one plausible contributor to the poor throughput, but the benchmark does not isolate kernel conversion cost from the rest of generation.
+
+Larger quantized batches recovered some throughput by spending the memory saved in the weights. INT4 batch 48 remained 15.6% slower than dense batch 24 and used nearly the same peak allocation. Batch 64 reached 11.233 GiB allocated on a 12 GB card and does not leave a practical safety margin for display use, allocator variation, or longer outputs. The package therefore treats both formats as explicit memory-capacity paths rather than speed modes and does not change the dense batch default automatically.
+
+### Specialized Dense Fine-Tune
+
+`NAMAA-Space/Cohere-Speech-Tashkeel-2B` was exercised as a representative native dense fine-tune at immutable revision `710704bf787fa3c27f7567aa08078861925aeee2`. It loaded through the package CLI, retained the optimized projection and mask paths, published model-aware JSON/profile provenance, and completed the balanced probe without OOM recovery.
+
+| Checkpoint | Wall | Generation | Wall RTFx | Peak allocated | Lexical WER | Lexical CER |
+|---|---:|---:|---:|---:|---:|---:|
+| Dense BF16 default | 32.460s | 27.663s | 155.04x | 9.426 GiB | 22.9551% | 11.5812% |
+| Tashkeel dense fine-tune | 41.525s | 36.644s | 121.20x | 9.426 GiB | 29.2721% | 14.1214% |
+
+The fine-tune was 27.9% slower and changed the task balance: it improved the Quran proxy WER from 13.85% to 9.33% while degrading both general MSA sets and both dialect sets. This is expected evidence of specialization, not a loader regression. Dense fine-tunes must be selected for their intended output and evaluated on representative references.
+
+#### Batch-Sensitive Dialectal Fine-Tune
+
+`oddadmix/cohere-transcribe-arabic-07-2026-dialectal@d8fa1665cec004e7b7cdeaec44a85dd139f4ac16` documents that padded batches degraded its private held-out evaluation and recommends per-sample generation. The package supports both policies through `--batch-size`; it does not infer performance policy from free-form model-card prose.
+
+The complete independent 500-clip probe tested both settings with identical weights, BF16 precision, duration ordering, generation safeguards, and scoring:
+
+| Checkpoint and policy | Wall | Generation | Wall RTFx | Peak allocated | Lexical WER | Lexical CER |
+|---|---:|---:|---:|---:|---:|---:|
+| Default dense, batch 24 | 32.460s | 27.663s | 155.04x | 9.426 GiB | 22.9551% | 11.5812% |
+| Dialectal fine-tune, batch 24 | 37.329s | 32.533s | 134.82x | 9.426 GiB | 49.6197% | 36.6863% |
+| Dialectal fine-tune, batch 1 | 119.015s | 114.782s | 42.29x | 4.392 GiB | 50.7528% | 37.4460% |
+
+Batch 1 reduced activation memory but was 3.19 times slower than batch 24. It changed 51 of 500 normalized hypotheses and raised WER by 1.1330 percentage points; the paired 95% interval was `[-0.8973, +3.6152]`, so this independent probe did not reproduce a batch-1 accuracy advantage. That does not disprove the model-card result on its private fine-tuning distribution. It means users of this checkpoint should benchmark both `--batch-size 1` and normal batching on their own references rather than accepting either policy universally.
+
+### LoRA Merge Path
+
+The package validates `SEQ_2_SEQ_LM` LoRA metadata, loads the adapter read-only, performs PEFT's safe merge, removes the PEFT wrapper, and then applies the Cohere hot-path optimizations. The merge restores the native model execution shape and prevents per-token adapter layers from remaining active during offline generation. The retained evaluation used PEFT 0.19.1.
+
+The public adapter `amzilmustapha/cohere-darija-lora-10-7-26` at revision `62b404e762b51c97e8167cbc2fb9781e356d6a1f` was tested on 100 independent Moroccan Casablanca clips totaling 364.718 seconds. It was mechanically compatible but produced severe repetition and insertion errors, so its timing cannot be interpreted as normal LoRA overhead:
+
+| Model path | Evaluation wall | Generation | Peak allocated | Lexical WER | Lexical CER |
+|---|---:|---:|---:|---:|---:|
+| Dense base | 3.507s | 2.631s | 4.638 GiB | 53.36% | 16.48% |
+| Adapter, safely merged | 13.148s | 12.335s | 4.638 GiB | 289.85% | 315.20% |
+| Adapter, unmerged research control | 23.807s | 22.929s | 4.761 GiB | 303.76% | 316.27% |
+
+Safe merging cut generation time by 46.2% relative to leaving this adapter active and returned peak allocation to the dense baseline. Its generation was still 4.69 times slower than the base, while evaluation wall was 3.75 times slower, because its pathological transcripts generated far more tokens. The package supports the adapter mechanism, but does not recommend or certify this adapter. An adapter should pass an independent in-domain accuracy evaluation before its performance is benchmarked or deployed.
+
 ## Alternate Inference Engines
 
 These experiments explain why the package remains on the optimized Transformers offline path. They are not selectable package backends.
@@ -268,7 +334,7 @@ python -m pip install torch==2.11.0 torchaudio==2.11.0 --index-url https://downl
 Then install the package extras needed by the modes under test:
 
 ```bash
-python -m pip install "cohere-transcribe-arabic[onnx,word,auditok]"
+python -m pip install "cohere-transcribe[onnx,word,auditok]"
 ```
 
 Run the validated long-form configuration into a fresh directory:
@@ -345,11 +411,14 @@ Run every performance configuration at least three times as a fresh process afte
 - No v0.1.0 installed-wheel paired merge versus no-merge campaign on continuous audio with human references.
 - No v0.1.0 installed-wheel adaptive-growth, pinned-memory, batch-size sweep, or pipeline-on/off campaign.
 - No v0.1.0 Librosa decoder throughput distribution.
+- Alternate dense, saved INT8/INT4, and adapter tables are controlled component runs plus package-path smokes, not repeated installed-wheel long-form campaigns.
+- No public LoRA adapter has passed this project's independent accuracy gate; the one evaluated adapter is retained as a failure case only.
 - No human word-boundary corpus for absolute timestamp accuracy.
-- No performance validation outside the Linux RTX 3060 BF16 environment.
+- No performance validation outside the Linux RTX 3060 host; BF16 is the only repeated installed-wheel ASR baseline, while FP16 alignment, saved INT8/INT4, and other precision results are narrower retained studies.
 
 ## Evidence Sources
 
-- [`reports/0.1.0-release-validation.json`](../reports/0.1.0-release-validation.json) contains installed-wheel run arrays, configurations, hashes, packaged execution and structural parity checks, decoder measurements, Silero validation, alignment measurements, and resume evidence.
+- [`reports/0.1.0-release-validation.json`](../reports/0.1.0-release-validation.json) contains the original installed-wheel run arrays, configurations, hashes, packaged execution and structural parity checks, decoder measurements, Silero validation, alignment measurements, and resume evidence.
+- [`reports/0.1.1-release-validation.json`](../reports/0.1.1-release-validation.json) contains custom dense, saved INT8/INT4, and PEFT adapter validation plus the unchanged-default regression evidence for the model-selection release.
 - [Accuracy Benchmarks](benchmarks.md) records the frozen evaluation suite, scoring and normalization methods, Cohere/Wit comparisons, confidence intervals, configuration sensitivity, and source-artifact hashes.
 - Repository-level research artifacts used to derive the retained sections are not part of the published wheel; package claims are grounded in the versioned runtime report above.

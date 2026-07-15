@@ -11,6 +11,7 @@ from typing import Any
 import torch
 
 from ..device import empty_device_cache
+from ..model_identity import DEFAULT_ASR_MODEL_ID, DEFAULT_ASR_MODEL_REVISION
 
 AsrLoader = Callable[[str, torch.dtype], tuple[Any, Any]]
 
@@ -38,7 +39,18 @@ class ModelResources:
     )
 
     def __init__(self) -> None:
-        self._asr_key: tuple[str, torch.dtype] | None = None
+        self._asr_key: (
+            tuple[
+                str,
+                torch.dtype,
+                str,
+                str | None,
+                str,
+                str | None,
+                str | None,
+            ]
+            | None
+        ) = None
         self._asr_processor: Any | None = None
         self._asr_model: Any | None = None
         self._closed = False
@@ -48,6 +60,11 @@ class ModelResources:
         device: str,
         dtype: torch.dtype,
         *,
+        model_id: str = DEFAULT_ASR_MODEL_ID,
+        model_revision: str | None = DEFAULT_ASR_MODEL_REVISION,
+        model_format: str = "dense",
+        adapter_id: str | None = None,
+        adapter_revision: str | None = None,
         loader: AsrLoader,
     ) -> tuple[Any, Any, bool]:
         """Return a compatible ASR pair, loading it only when necessary."""
@@ -55,7 +72,15 @@ class ModelResources:
         with _ASR_OWNER_GUARD:
             if self._closed:
                 raise RuntimeError("Model resources have been closed")
-            key = (device, dtype)
+            key = (
+                device,
+                dtype,
+                model_id,
+                model_revision,
+                model_format,
+                adapter_id,
+                adapter_revision,
+            )
             if self._asr_model is not None and self._asr_key != key:
                 self.evict_asr()
 

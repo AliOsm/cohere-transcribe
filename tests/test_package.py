@@ -11,6 +11,7 @@ try:
 except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 from cohere_transcribe import __version__, doctor
+from cohere_transcribe._version import DISTRIBUTION_NAME
 from cohere_transcribe.alignment.text_utils import preprocess_text
 from cohere_transcribe.audio.backends import TorchCodecStatus
 from cohere_transcribe.config import parse_args, validate_args
@@ -35,9 +36,10 @@ def run_python(*arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_pyproject_and_runtime_versions_match() -> None:
+def test_pyproject_and_runtime_metadata_match() -> None:
     with (ROOT / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)["project"]
+    assert project["name"] == DISTRIBUTION_NAME
     assert project["version"] == __version__
 
 

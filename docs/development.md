@@ -22,7 +22,7 @@ Create an environment with every optional feature and the development group:
 
 ```bash
 uv venv --python 3.12
-uv pip install --editable ".[auditok,onnx,word]" --group dev --torch-backend=auto
+uv pip install --editable ".[adapters,auditok,onnx,quantized,word]" --group dev --torch-backend=auto
 ```
 
 `--torch-backend=auto` selects a device-appropriate PyTorch index. Run project commands with `uv run --no-sync` afterward so synchronization does not replace that device-specific Torch build.
@@ -49,7 +49,7 @@ src/cohere_transcribe/state/      checkpoints, manifests, contracts, and locks
 src/cohere_transcribe/alignment/  word-alignment runtime and source provenance
 src/cohere_transcribe/vad/        Silero runtimes, weights, and notices
 tests/                            unit, contract, integration, and failure-path tests
-scripts/                          typing, release, and clean-install validation helpers
+scripts/                          public typing and clean-install smoke helpers
 docs/                             current user and developer documentation
 reports/                          versioned validation evidence
 .github/workflows/                CI, TestPyPI, and PyPI publishing
@@ -69,7 +69,7 @@ uv run --no-sync mypy --strict scripts/typecheck_public_api.py
 uv run --no-sync pytest
 ```
 
-CI validates the locked all-extras environment and runs the test suite on Python 3.10, 3.11, 3.12, and 3.13 with CPU PyTorch. The lock validation catches releases that declare Python compatibility without publishing an installable artifact for that interpreter. The CPU suite does not download gated model weights. Real model, CUDA, long-form, and corpus benchmarks are separate manual validation because they require access credentials, representative audio, and stable hardware.
+CI dry-runs the locked all-extras resolution and runs the CPU test suite on Python 3.10, 3.11, 3.12, and 3.13 with the `auditok`, `onnx`, and `word` extras installed. Adapter and quantized dependency installation is covered by the clean-wheel validation below, while real PEFT, bitsandbytes, CUDA, long-form, and corpus runs remain manual because they require model access, representative audio, and stable hardware. The lock check also catches dependencies that do not publish an artifact for a declared Python version.
 
 ### Test Scope
 
@@ -87,8 +87,10 @@ Core dependencies support the default segment-timestamp path. Optional dependenc
 
 | Extra | Purpose |
 |---|---|
+| `adapters` | PEFT LoRA validation and safe merge over a dense Cohere ASR base |
 | `auditok` | Energy-based segmentation |
 | `onnx` | Sequence-based ONNX Silero engine |
+| `quantized` | Accelerate and bitsandbytes for saved INT8/INT4 checkpoints on CUDA |
 | `word` | TorchAudio forced alignment and Uroman normalization |
 
 Keep implementation-sensitive versions exact when behavior or ABI requires it:
@@ -100,6 +102,8 @@ Keep implementation-sensitive versions exact when behavior or ABI requires it:
 - ONNX Runtime stays below 1.24 only on Python 3.10 because newer releases do not publish CPython 3.10 artifacts.
 
 General-purpose dependencies should remain unpinned unless the package has a demonstrated compatibility boundary. `uv.lock` captures a repeatable development resolution without turning every transitive version into public package metadata.
+
+Model-format integrations should keep optional libraries lazy. Dense model selection must remain available from the base installation; saved bitsandbytes models may import only the `quantized` extra, and adapter loading may import only the `adapters` extra. Tests should cover missing extras, unsupported metadata, non-CUDA quantized selection, adapter/base mismatches, immutable Hub revision resolution, direct local paths, null local revisions, cache eviction, state-contract invalidation, and output/profile/API provenance. Local-path tests must prove that Transformers and PEFT receive the canonical directory without a `revision` argument and that metadata or weight validation does not call the Hub. A real-model change also requires at least one complete CLI or API run for every affected loader path and a paired recognition benchmark when model outputs can change.
 
 Do not add direct Git dependencies to published wheel metadata. Any included upstream source must be limited to the required code, preserve its notices, record repository and revision provenance, and have parity tests against the evaluated upstream behavior.
 
@@ -134,9 +138,9 @@ Then validate every extra and dependency contract:
 
 ```bash
 WHEEL="$(realpath dist/*.whl)"
-"$WHEEL_TEST/venv/bin/python" -m pip install "${WHEEL}[auditok,onnx,word]"
+"$WHEEL_TEST/venv/bin/python" -m pip install "${WHEEL}[adapters,auditok,onnx,quantized,word]"
 "$WHEEL_TEST/venv/bin/python" -m pip check
-"$WHEEL_TEST/venv/bin/python" -c "import auditok.core"
+"$WHEEL_TEST/venv/bin/python" -c "import accelerate, auditok.core, bitsandbytes, peft"
 "$WHEEL_TEST/venv/bin/cohere-transcribe-doctor" --mode word --audio-backend librosa
 rm -rf "$WHEEL_TEST"
 ```
@@ -180,7 +184,7 @@ For a release:
 3. Run the source, build, Twine, clean-wheel, and applicable model validation gates.
 4. Commit and review the exact release tree.
 5. Ensure CI passes on `main` for that commit.
-6. Draft a GitHub Release with tag `v<package-version>`, for example `v0.1.0`, targeting that commit.
+6. Draft a GitHub Release with tag `v<package-version>`, for example `vX.Y.Z`, targeting that commit.
 7. Publish the GitHub Release.
 
 Publishing the GitHub Release triggers `release.yml`. Its unprivileged build job checks that the tag matches the package version, builds the wheel and source distribution once, validates their metadata, and transfers those exact artifacts to a minimal PyPI Trusted Publishing job. Quality checks and tests stay in CI rather than being duplicated during publication.
@@ -208,7 +212,7 @@ PY
 )"
 python -m pip download --no-deps \
   --index-url https://test.pypi.org/simple/ \
-  "cohere-transcribe-arabic==$PACKAGE_VERSION" \
+  "cohere-transcribe==$PACKAGE_VERSION" \
   --dest "$TESTPYPI_ROOT"
 python -m venv "$TESTPYPI_ROOT/venv"
 "$TESTPYPI_ROOT/venv/bin/python" -m pip install --upgrade pip
@@ -223,7 +227,7 @@ rm -rf "$TESTPYPI_ROOT"
 Configure TestPyPI with this trusted publisher:
 
 ```text
-Repository: AliOsm/cohere-transcribe-arabic-batch-inference
+Repository: AliOsm/cohere-transcribe
 Workflow: testpypi.yml
 Environment: testpypi
 ```
@@ -231,7 +235,7 @@ Environment: testpypi
 Configure PyPI with this trusted publisher:
 
 ```text
-Repository: AliOsm/cohere-transcribe-arabic-batch-inference
+Repository: AliOsm/cohere-transcribe
 Workflow: release.yml
 Environment: pypi
 ```

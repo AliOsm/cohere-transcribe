@@ -12,6 +12,7 @@ from unittest import mock
 import numpy as np
 import torch
 
+from cohere_transcribe._version import DISTRIBUTION_NAME
 from cohere_transcribe.alignment.runtime import compute_emissions_streaming
 from cohere_transcribe.asr import execution as asr
 from cohere_transcribe.asr.batching import record_prepared_batch
@@ -145,7 +146,7 @@ class RuntimeRegressionTest(unittest.TestCase):
             }
         ]
         payload = json.loads(generate_json(job, words, [], ["مرحبا"]))
-        self.assertEqual(payload["schema_version"], 7)
+        self.assertEqual(payload["schema_version"], 8)
         self.assertEqual(payload["source"]["decode_backend"], "ffmpeg")
         self.assertEqual(
             payload["source"]["decode_fallback_reason"],
@@ -153,6 +154,7 @@ class RuntimeRegressionTest(unittest.TestCase):
         )
         self.assertEqual(payload["segments"][0]["segment_index"], 1)
         self.assertEqual(payload["words"][0]["segment_index"], 1)
+        self.assertEqual(payload["models"]["vad"]["distribution"], DISTRIBUTION_NAME)
         self.assertEqual(
             payload["models"]["aligner"],
             None,
@@ -169,6 +171,10 @@ class RuntimeRegressionTest(unittest.TestCase):
         self.assertEqual(
             word_payload["models"]["aligner"]["kernel"]["operation"],
             "torchaudio.functional.forced_align",
+        )
+        self.assertEqual(
+            word_payload["models"]["aligner"]["utility_package"]["distribution"],
+            DISTRIBUTION_NAME,
         )
 
     def test_profile_separates_requested_and_resolved_configuration(self) -> None:
@@ -189,11 +195,12 @@ class RuntimeRegressionTest(unittest.TestCase):
             "cpu",
             torch.float32,
         )
-        self.assertEqual(profile["schema_version"], 8)
+        self.assertEqual(profile["schema_version"], 9)
         self.assertEqual(profile["configuration"]["device"], "auto")
         self.assertEqual(profile["configuration"]["vad_engine"], "auto")
         self.assertEqual(profile["resolved_configuration"]["device"], "cpu")
         self.assertEqual(profile["resolved_configuration"]["vad_engine"], "torch")
+        self.assertEqual(profile["models"]["vad"]["distribution"], DISTRIBUTION_NAME)
         self.assertEqual(profile["files"][0]["decode_backend"], "ffmpeg")
         self.assertEqual(
             profile["files"][0]["decode_fallback_reason"],

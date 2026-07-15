@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.1 - Unreleased
+
+- Add custom-model selection with immutable Hub revisions and canonical local identities for native dense Cohere ASR checkpoints, saved bitsandbytes INT8/INT4 checkpoints through the `quantized` extra, and safely merged PEFT LoRA adapters through the `adapters` extra.
+- Load compatible model and adapter directories directly from canonical local paths without Hub resolution, revisions, artifact hashing, or another cache; accept path-like references in the Python API and retain canonical/null provenance in outputs and state contracts.
+- Validate native model, processor, quantization, adapter, and weight-artifact contracts before inference; reject unsupported remote-code, quantizer, ONNX-only, GGUF, MLX, device, and adapter/base combinations explicitly.
+- Bind resolved model and adapter identity plus detected model format into reusable-resource keys. Retain complete quantization metadata in resumable state, JSON output, and profile provenance; report detected format and runtime readiness through the doctor. Advance output schema 8, profile schema 9, and state contract schema 3.
+- Preserve all 500 retained default-model transcripts and established work counts while documenting independent performance and accuracy results for every evaluated alternate checkpoint.
+
 ## 0.1.0 - 2026-07-14
 
 - Package the validated batch inference runtime under `cohere_transcribe` with `cohere-transcribe` and doctor console commands.
@@ -9,7 +17,7 @@
 - Load reusable API models lazily, retain compatible ASR state for text and segment calls, evict ASR before one-shot word alignment, and serialize heavy calls within a process.
 - Organize the public API, audio, ASR, output, pipeline, state, VAD, and alignment code into shallow domain packages while keeping cross-cutting configuration and entry-point modules at the package root, without changing inference logic.
 - Remove redundant facades, duplicate helpers, unreachable aligner modes, unused confidence processing, and internal API inventories while preserving exact long-form, 500-file, and word-timestamp parity.
-- Make standard `pip install cohere-transcribe-arabic` the primary user path while retaining uv for development and advanced device-aware installation.
+- Make standard `pip install cohere-transcribe` the primary user path while retaining uv for development and advanced device-aware installation.
 - Add wheel builds, clean-install validation, Linux CPU CI, TestPyPI verification, and PyPI Trusted Publishing workflows.
 - Package the maintained forced-aligner normalization and span utilities at the evaluated `main` revision so PyPI users do not resolve the unrelated project that owns the distribution name.
 - Preserve non-word startup performance with lazy alignment imports and keep package imports free of CLI environment side effects.
@@ -36,6 +44,6 @@
 - Resolve automatic precision and device-specific batch defaults consistently, expose `--version`, and declare the release-tested Linux/Python 3.10-3.13 support surface.
 - Upgrade the exact Transformers compatibility release to 5.13.1 after byte-level processor comparison, patched CUDA generation parity, retained long-form and 500-file output parity, and performance validation.
 - Include a universal `uv.lock` for repeatable source development and CI consistency checks while keeping device-specific PyTorch wheel selection as an explicit advanced installation step.
-- Add exhaustive CLI contract, filesystem-planning, preflight, installed-wheel, signal, locked-environment, and real CUDA validation across all public options and supported Python versions.
+- Add broad CLI contract, filesystem-planning, preflight, installed-wheel, signal, locked-environment, and real CUDA validation across public options and supported Python versions.
 - Organize CI into focused quality and Python-version test jobs, use maintained GitHub Action release tags, and publish GitHub Releases through separate build and Trusted Publishing jobs without repeating CI.
 - Organize current user, architecture, development, performance, and accuracy benchmark guidance under `docs/`, with versioned release evidence under `reports/`.

@@ -95,5 +95,7 @@ def patch_cpu_runtime(monkeypatch: pytest.MonkeyPatch) -> Any:
         ),
     )
     monkeypatch.setattr(runtime.inputs_module, "probe_duration", lambda _path: 1.0)
-    monkeypatch.setattr(runtime, "preflight_runtime", lambda _args: None)
+    monkeypatch.setattr(
+        runtime, "preflight_runtime", lambda _args, _require_model_runtime: None
+    )
     return runtime

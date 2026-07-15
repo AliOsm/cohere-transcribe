@@ -21,6 +21,7 @@ def report_progress(event: ProgressEvent) -> None:
 
 def consume_public_api() -> tuple[TranscriptionRun, TranscriptionRun]:
     options = TranscriptionOptions(
+        model=Path("models/cohere-asr"),
         language="ar",
         alignment="segment",
         publication=PublicationOptions(formats=("txt", "json")),

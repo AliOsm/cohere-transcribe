@@ -18,13 +18,12 @@ from typing import Any
 import numpy as np
 import torch
 
+from ._version import DISTRIBUTION_NAME
 from .models import (
     ALIGN_MODEL_ID,
     ALIGN_MODEL_REVISION,
     ALIGN_PACKAGE_REPOSITORY,
     ALIGN_PACKAGE_REVISION,
-    ASR_MODEL_REVISION,
-    MODEL_ID,
     PROFILE_SCHEMA_VERSION,
     SILERO_VERSION,
     UROMAN_VERSION,
@@ -91,11 +90,14 @@ def runtime_environment(device: str, dtype: torch.dtype) -> dict[str, Any]:
         "numpy",
         "tqdm",
         "onnxruntime",
-        "cohere-transcribe-arabic",
+        DISTRIBUTION_NAME,
         "uroman",
         "torchcodec",
         "librosa",
         "auditok",
+        "accelerate",
+        "bitsandbytes",
+        "peft",
     )
     environment: dict[str, Any] = {
         "python": sys.version.splitlines()[0],
@@ -173,13 +175,23 @@ def build_profile_payload(
         "created_unix_seconds": time.time(),
         "implementation": runtime_implementation(),
         "models": {
-            "asr": {"id": MODEL_ID, "revision": ASR_MODEL_REVISION},
+            "asr": {
+                "id": args.model,
+                "revision": args.model_revision,
+                "format": args.model_format,
+                "quantization": args.model_quantization,
+                "adapter": (
+                    {"id": args.adapter, "revision": args.adapter_revision}
+                    if args.adapter is not None
+                    else None
+                ),
+            },
             "vad": (
                 {
                     "source": "silero-vad",
                     "source_version": SILERO_VERSION,
-                    "distribution": "cohere-transcribe-arabic",
-                    "version": package_version("cohere-transcribe-arabic"),
+                    "distribution": DISTRIBUTION_NAME,
+                    "version": package_version(DISTRIBUTION_NAME),
                     "torch_weight_asset": "cohere_transcribe/vad/silero_vad.jit",
                     "onnx_weight_asset": "cohere_transcribe/vad/silero_vad_v6.onnx",
                     "packed_torch_implementation": "packed-sequence-v1",
@@ -197,7 +209,7 @@ def build_profile_payload(
                         "version": package_version("torchaudio"),
                     },
                     "utility_package": {
-                        "distribution": "cohere-transcribe-arabic",
+                        "distribution": DISTRIBUTION_NAME,
                         "location": "cohere_transcribe.alignment",
                         "repository": ALIGN_PACKAGE_REPOSITORY,
                         "revision": ALIGN_PACKAGE_REVISION,

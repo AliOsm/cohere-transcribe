@@ -1,3 +1,4 @@
 """Single runtime version imported without loading the ML stack."""
 
-__version__ = "0.1.0"
+DISTRIBUTION_NAME = "cohere-transcribe"
+__version__ = "0.1.1"

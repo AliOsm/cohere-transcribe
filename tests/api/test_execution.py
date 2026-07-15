@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -16,6 +17,7 @@ from cohere_transcribe import (
     TranscriptionRuntimeError,
     transcribe,
 )
+from cohere_transcribe.model_identity import ResolvedModelIdentity
 
 from ._support import patch_execute, run_for
 
@@ -112,6 +114,206 @@ def test_public_in_memory_execution_returns_text_without_creating_artifacts(
     assert run.single.outputs == ()
     assert not run.single.provenance.published
     assert {path.name for path in tmp_path.iterdir()} == {"clip.wav"}
+
+
+def test_selected_adapter_provenance_reaches_api_json_and_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cohere_transcribe.runtime.engine as runtime
+    from cohere_transcribe.output.pipeline import write_segment_timed_outputs
+
+    source = tmp_path / "clip.wav"
+    source.write_bytes(b"fixture")
+    output_dir = tmp_path / "out"
+    profile_path = tmp_path / "profile.json"
+    model_revision = "1" * 40
+    adapter_revision = "2" * 40
+    verified: list[ResolvedModelIdentity] = []
+
+    monkeypatch.setattr(
+        runtime,
+        "_resolve_precision",
+        lambda args: (
+            "cpu",
+            "fp32",
+            torch.float32,
+            torch.float32,
+            args.dtype,
+            args.vad_engine,
+        ),
+    )
+    monkeypatch.setattr(runtime.inputs_module, "probe_duration", lambda _path: 1.0)
+    monkeypatch.setattr(
+        runtime,
+        "resolve_model_identity",
+        lambda *_args, **_kwargs: ResolvedModelIdentity(
+            model_id="owner/model",
+            model_revision=model_revision,
+            model_format="dense",
+            adapter_id="owner/adapter",
+            adapter_revision=adapter_revision,
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "verify_model_weight_artifacts",
+        lambda identity: verified.append(identity),
+    )
+    monkeypatch.setattr(
+        runtime, "preflight_runtime", lambda _args, _require_model_runtime: None
+    )
+
+    def fake_transcribe(jobs, args, *_args, publish_outputs, **_kwargs):
+        assert publish_outputs
+        for job in jobs:
+            assert (job.model_id, job.model_revision, job.model_format) == (
+                "owner/model",
+                model_revision,
+                "dense",
+            )
+            assert (job.adapter_id, job.adapter_revision) == (
+                "owner/adapter",
+                adapter_revision,
+            )
+            job.duration = 1.0
+            job.segment_times = [(0.0, 1.0)]
+            job.speech_spans = [(0.0, 1.0)]
+            job.segment_texts = ["selected model text"]
+        write_segment_timed_outputs(jobs, args, publish_outputs=True)
+
+    monkeypatch.setattr(
+        runtime.transcription_pipeline, "transcribe_all", fake_transcribe
+    )
+    options = TranscriptionOptions(
+        model="owner/model",
+        model_revision="release",
+        adapter="owner/adapter",
+        adapter_revision="adapter-release",
+        vad="none",
+        audio_backend="librosa",
+        alignment="segment",
+        publication=PublicationOptions(
+            formats=("json",),
+            output_dir=output_dir,
+            existing="overwrite",
+            profile_json=profile_path,
+        ),
+    )
+
+    run = transcribe(source, options=options)
+
+    assert len(verified) == 1
+    assert run.single.provenance.model_id == "owner/model"
+    assert run.single.provenance.model_revision == model_revision
+    assert run.single.provenance.adapter_id == "owner/adapter"
+    assert run.single.provenance.adapter_revision == adapter_revision
+    output = json.loads((output_dir / "clip.json").read_text(encoding="utf-8"))
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    expected_adapter = {"id": "owner/adapter", "revision": adapter_revision}
+    assert output["models"]["asr"]["revision"] == model_revision
+    assert output["models"]["asr"]["adapter"] == expected_adapter
+    assert profile["models"]["asr"]["revision"] == model_revision
+    assert profile["models"]["asr"]["adapter"] == expected_adapter
+
+
+def test_local_paths_are_canonical_with_null_revisions_in_all_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import cohere_transcribe.runtime.engine as runtime
+    from cohere_transcribe.output.pipeline import write_segment_timed_outputs
+
+    source = tmp_path / "clip.wav"
+    source.write_bytes(b"fixture")
+    model = tmp_path / "model"
+    adapter = tmp_path / "adapter"
+    model.mkdir()
+    adapter.mkdir()
+    (model / "config.json").write_text(
+        json.dumps({"model_type": "cohere_asr"}), encoding="utf-8"
+    )
+    (model / "model.safetensors").write_bytes(b"fixture")
+    (adapter / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "base_model_name_or_path": "training-machine/base",
+                "peft_type": "LORA",
+                "task_type": "SEQ_2_SEQ_LM",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (adapter / "adapter_model.safetensors").write_bytes(b"fixture")
+    output_dir = tmp_path / "out"
+    profile_path = tmp_path / "profile.json"
+
+    monkeypatch.setattr(
+        runtime,
+        "_resolve_precision",
+        lambda args: (
+            "cpu",
+            "fp32",
+            torch.float32,
+            torch.float32,
+            args.dtype,
+            args.vad_engine,
+        ),
+    )
+    monkeypatch.setattr(runtime.inputs_module, "probe_duration", lambda _path: 1.0)
+    monkeypatch.setattr(
+        runtime, "preflight_runtime", lambda _args, _require_model_runtime: None
+    )
+
+    def fake_transcribe(jobs, args, *_args, publish_outputs, **_kwargs):
+        assert args.model == str(model.resolve())
+        assert args.model_revision is None
+        assert args.adapter == str(adapter.resolve())
+        assert args.adapter_revision is None
+        for job in jobs:
+            job.duration = 1.0
+            job.segment_times = [(0.0, 1.0)]
+            job.speech_spans = [(0.0, 1.0)]
+            job.segment_texts = ["local model text"]
+        write_segment_timed_outputs(jobs, args, publish_outputs=publish_outputs)
+
+    monkeypatch.setattr(
+        runtime.transcription_pipeline, "transcribe_all", fake_transcribe
+    )
+    options = TranscriptionOptions(
+        model=model,
+        adapter=adapter,
+        vad="none",
+        audio_backend="librosa",
+        alignment="segment",
+        publication=PublicationOptions(
+            formats=("json",),
+            output_dir=output_dir,
+            existing="overwrite",
+            profile_json=profile_path,
+        ),
+    )
+
+    run = transcribe(source, options=options)
+
+    expected_adapter = {"id": str(adapter.resolve()), "revision": None}
+    output = json.loads((output_dir / "clip.json").read_text(encoding="utf-8"))
+    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    assert run.requested_options.model == model
+    assert run.resolved_options.model == str(model.resolve())
+    assert run.resolved_options.model_revision is None
+    assert run.single.provenance.model_id == str(model.resolve())
+    assert run.single.provenance.model_revision is None
+    assert run.single.provenance.adapter_id == str(adapter.resolve())
+    assert run.single.provenance.adapter_revision is None
+    assert output["models"]["asr"] == {
+        "id": str(model.resolve()),
+        "revision": None,
+        "format": "dense",
+        "quantization": None,
+        "adapter": expected_adapter,
+    }
+    assert profile["models"]["asr"]["id"] == str(model.resolve())
+    assert profile["models"]["asr"]["revision"] is None
+    assert profile["models"]["asr"]["adapter"] == expected_adapter
 
 
 def test_publication_writes_outputs_and_verified_skip_does_not_run_the_model(

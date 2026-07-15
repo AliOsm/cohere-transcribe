@@ -13,18 +13,19 @@ from typing import Any, TypedDict
 import numpy as np
 
 from ._version import __version__
+from .model_identity import DEFAULT_ASR_MODEL_ID, DEFAULT_ASR_MODEL_REVISION
 from .progress import write as progress_write
 
-MODEL_ID = "CohereLabs/cohere-transcribe-arabic-07-2026"
+MODEL_ID = DEFAULT_ASR_MODEL_ID
 MODEL_PAGE_URL = f"https://huggingface.co/{MODEL_ID}"
 ALIGN_MODEL_ID = "MahmoudAshraf/mms-300m-1130-forced-aligner"
 # These are the exact revisions used by the accuracy and throughput evaluation.
-ASR_MODEL_REVISION = "0a8193caa4f3f92131471ab08824e488141cb392"
+ASR_MODEL_REVISION = DEFAULT_ASR_MODEL_REVISION
 ALIGN_MODEL_REVISION = "49402e9577b1158620820667c218cd494cc44486"
 ALIGN_PACKAGE_REPOSITORY = "https://github.com/MahmoudAshraf97/ctc-forced-aligner.git"
 ALIGN_PACKAGE_REVISION = "11855d1de76af2b490dd2e8e2db2661805ae90a0"
-OUTPUT_SCHEMA_VERSION = 7
-PROFILE_SCHEMA_VERSION = 8
+OUTPUT_SCHEMA_VERSION = 8
+PROFILE_SCHEMA_VERSION = 9
 SR = 16_000
 ALIGN_WINDOW_S = 30
 ALIGN_CONTEXT_S = 2
@@ -77,11 +78,14 @@ def is_model_access_error(error: BaseException) -> bool:
     return False
 
 
-def model_access_message(error: BaseException | None = None) -> str:
-    """Return actionable instructions for the gated Cohere model."""
+def model_access_message(
+    error: BaseException | None = None, *, model_id: str = MODEL_ID
+) -> str:
+    """Return actionable instructions for a gated Hugging Face ASR model."""
+    model_page_url = f"https://huggingface.co/{model_id}"
     message = (
-        f"Cannot access the gated Cohere ASR model {MODEL_ID}. Accept the model "
-        f"terms at {MODEL_PAGE_URL}, then authenticate with `hf auth login` or set "
+        f"Cannot access the gated ASR model {model_id}. Accept its terms at "
+        f"{model_page_url}, then authenticate with `hf auth login` or set "
         "HF_TOKEN for the same Hugging Face account."
     )
     if error is not None:
@@ -228,6 +232,12 @@ class AudioJob:
     language: str
     vad_mode: str
     alignment_mode: str
+    model_id: str = MODEL_ID
+    model_revision: str | None = ASR_MODEL_REVISION
+    model_format: str = "dense"
+    model_quantization: dict[str, Any] | None = None
+    adapter_id: str | None = None
+    adapter_revision: str | None = None
     output_paths: dict[str, Path] = field(default_factory=dict)
     state_path: Path | None = None
     checkpoint_path: Path | None = None
@@ -412,6 +422,10 @@ class SubtitleCue(TypedDict):
 @dataclass(slots=True)
 class TranscriptionConfig:
     audio: list[str]
+    model: str
+    model_revision: str | None
+    adapter: str | None
+    adapter_revision: str | None
     language: str
     formats: list[str] | None
     text_only: bool
@@ -454,3 +468,5 @@ class TranscriptionConfig:
     max_cue_dur: float
     max_gap: float
     profile_json: str | None
+    model_format: str | None = None
+    model_quantization: dict[str, Any] | None = None

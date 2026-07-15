@@ -41,7 +41,7 @@ jobs:
     needs: build
     environment:
       name: pypi
-      url: https://pypi.org/project/cohere-transcribe-arabic/
+      url: https://pypi.org/project/cohere-transcribe/
     permissions:
       id-token: write
     steps:

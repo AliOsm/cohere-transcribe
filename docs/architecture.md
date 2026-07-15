@@ -10,7 +10,7 @@ The package is an offline batch-inference library and CLI around Cohere's Arabic
 - Model, segmentation, generation, and render settings participate in durable state contracts.
 - In-process publication failures trigger rollback; if rollback is incomplete, that condition is reported. A manifest committed last detects incomplete generations after abrupt process termination or machine failure.
 - CLI-handled SIGINT and SIGTERM cancellation releases locks, workers, and child processes before returning the documented exit status; the API cleans up and propagates interruption without replacing application signal handlers.
-- Model revisions and implementation fingerprints are bound into state contracts and written explicitly in output JSON and profile provenance.
+- Resolved Hub commits or canonical local model paths and implementation fingerprints are bound into state contracts and written explicitly in output JSON and profile provenance.
 - Public package import and API object construction do not import the ML runtime or load a model.
 - One process executes one heavy API run at a time so cancellation state, PyTorch thread settings, CUDA telemetry, and retained resources cannot interfere.
 
@@ -18,6 +18,9 @@ The package is an offline batch-inference library and CLI around Cohere's Arabic
 
 ```text
 CLI arguments or typed Python options
+        |
+        v
+model/adapter identity resolution and compatibility validation
         |
         v
 input discovery and optional publication planning
@@ -51,7 +54,7 @@ optional separately atomic run profile
 immutable API results or CLI summary
 ```
 
-CLI argument parsing, `--help`, `--version`, and basic semantic validation complete before PyTorch or pipeline modules are imported. Importing `cohere_transcribe`, creating `TranscriptionOptions`, and constructing `Transcriber` are also dependency-light; the private runtime is imported on the first transcription call. Device selection, input discovery, optional filesystem collision checks, and selected-path dependency preflight finish before any model weights are loaded.
+CLI argument parsing, `--help`, `--version`, and basic semantic validation complete before PyTorch or pipeline modules are imported. Importing `cohere_transcribe`, creating `TranscriptionOptions`, and constructing `Transcriber` are also dependency-light; the private runtime is imported on the first transcription call. Device selection happens before the selected model reference is resolved. For a Hub source, the resolver downloads only configuration metadata and converts every branch, tag, or default revision to an immutable commit. For an existing local directory, it canonicalizes the path, reads metadata directly, and uses no revision or Hub request. Both branches classify the native Cohere checkpoint, validate optional adapter metadata, and reject unsupported formats before input planning or weight loading. Input discovery and contract matching then determine whether fresh ASR is required. Only fresh-ASR jobs verify a supported Transformers or PEFT weight entry point and require model-specific optional runtimes; checkpoint-only rendering still binds the resolved model identity but does not require evicted weights, bitsandbytes, or PEFT. Filesystem collision checks and selected-path dependency preflight finish before any model weights are loaded.
 
 ## Module Ownership
 
@@ -59,7 +62,7 @@ CLI argument parsing, `--help`, `--version`, and basic semantic validation compl
 |---|---|---|
 | Public API | `api/`, `py.typed` | Dependency-light entry points, immutable public contracts, path normalization, exceptions, and typing marker |
 | Shared runtime | `runtime/`, `progress.py` | Execute typed or CLI configuration, own reusable models, build immutable results, render CLI telemetry, translate API errors, serialize process-wide runtime use, and route reporting |
-| Core contracts and entry points | `models.py`, `_version.py`, `__init__.py`, `__main__.py` | Internal domain types/constants, schema identifiers, lightweight public exports, and module entry points |
+| Core contracts and entry points | `models.py`, `model_identity.py`, `_version.py`, `__init__.py`, `__main__.py` | Internal domain types/constants, Hub and local model or adapter resolution, schema identifiers, lightweight public exports, and module entry points |
 | CLI application | `cli.py`, `config.py`, `preflight.py`, `device.py` | Parse and validate configuration, select the compute device and precision, and coordinate command exit behavior |
 | Inputs | `inputs.py` | Expand files and directories, probe durations, preserve relative paths, reject collisions, and construct jobs |
 | Audio | `audio/` | Select decoders, enforce bounded PCM loading, construct fixed or Auditok spans, and prepare bounded source groups |
@@ -101,7 +104,11 @@ Auditok and fixed windows are independent segmentation modes. Auditok uses an op
 
 ## ASR Execution
 
-The model loader applies two Cohere-specific hot-path optimizations: the encoder-to-decoder projection is memoized for an autoregressive decode, and the encoder attention mask is converted once before repeated decoder steps. Exact Transformers and model revisions protect these private integration points.
+The model loader accepts only native Transformers `CohereAsrConfig`, `CohereAsrProcessor`, and `CohereAsrForConditionalGeneration` contracts with remote code disabled. Configuration inspection classifies a checkpoint as dense, saved bitsandbytes INT8, or saved bitsandbytes INT4. Unsupported quantizers and ambiguous INT4/INT8 metadata fail before weight loading. Saved bitsandbytes models require the optional quantized runtime and CUDA device placement; the loader does not move an already-dispatched quantized model after loading.
+
+An optional PEFT adapter must declare LoRA with `SEQ_2_SEQ_LM`. When the base is Hub-backed, adapter base repository and optional base revision metadata must agree with the resolved model. When the base is local, historical repository strings cannot identify its filesystem contents, so PEFT structural loading and safe merge are the compatibility gate. The loader loads the adapter read-only, calls safe merge, removes the PEFT wrapper, and only then applies the Cohere-specific hot-path optimizations. Adapters over saved quantized checkpoints are rejected because this release has not established a correct merge and placement contract for that combination.
+
+For all three supported model formats, the encoder-to-decoder projection is memoized for an autoregressive decode and the encoder attention mask is converted once before repeated decoder steps. The exact Transformers release protects these private integration points. A reusable `Transcriber` key contains device, dtype, resolved model identity, optional revision, detected format, and resolved adapter identity, so selecting another Hub commit or canonical local directory evicts the previous model instead of reusing incompatible state. The package deliberately does not fingerprint local directory contents; replacing files in place requires recreating the `Transcriber`. Published results additionally require a fresh output directory or invalidation of the matching checkpoint and manifest before overwrite.
 
 Segments available within each prepared group are ordered by duration, then packed with both row and padded-audio constraints. CPU feature preparation for the next batch overlaps model generation for the current batch. Host pinning and adaptive growth remain optional; static defaults are selected by device.
 
@@ -113,7 +120,7 @@ Generation detects rows that consume the token limit without EOS. The default po
 
 `transcribe()` creates a one-shot `Transcriber`, performs one run, and closes it in all exit paths. `Transcriber` separates its dependency-light public façade from a private runtime session. The session loads ASR lazily at the same point where first-group audio preparation is already in flight, preserving startup overlap.
 
-Text-only and segment-timed calls can reuse a compatible ASR processor and model across calls. A process-wide ownership lease permits only one retained 2B ASR model; when another session needs ASR, it evicts the previous owner's model before loading or reusing its own, and the previous session reloads if called again. A word-alignment call evicts the current ASR owner before the aligner is loaded, including checkpoint-only calls that do not acquire ASR themselves, because the runtime does not assume both models fit on the accelerator together. The aligner remains one-shot; a later transcription reloads ASR. Closing a session releases any model state it still owns and is idempotent.
+A reusable session configured for text-only or segment timing can retain its compatible ASR processor and model across repeated calls; the session's options are immutable. A process-wide ownership lease permits only one retained 2B ASR model; when another session needs ASR, it evicts the previous owner's model before loading or reusing its own, and the previous session reloads if called again. A word-alignment call evicts the current ASR owner before the aligner is loaded, including checkpoint-only calls that do not acquire ASR themselves, because the runtime does not assume both models fit on the accelerator together. The aligner remains one-shot; a later transcription reloads ASR. Closing a session releases any model state it still owns and is idempotent.
 
 The public result layer snapshots mutable internal jobs into frozen `TranscriptionRun`, `TranscriptionResult`, segment, word, cue, provenance, option, and statistics objects. A failed file can therefore coexist with successful siblings without exposing internal lifecycle state. Verified skipped publications are represented explicitly, but existing transcript contents are not reloaded into the result.
 
@@ -131,7 +138,7 @@ Only four pure-Python normalization and span helpers are required from the maint
 
 ## Durable State and Publication
 
-The ASR contract covers source identity, language, resolved device precision, model/runtime revisions, segmentation, and generation settings. The render contract separately covers formats, timing mode, and cue settings. A render-only change can therefore reuse compatible ASR text.
+The ASR contract covers source identity, language, resolved device precision, model repository plus immutable revision or canonical local directory plus null revision, detected format, complete saved quantization configuration, optional adapter identity, runtime revisions, segmentation, and generation settings. The render contract separately covers formats, timing mode, and cue settings. A render-only change can therefore reuse compatible ASR text, while selecting another model identity, format, quantization, or adapter invalidates stale checkpoints and manifests.
 
 Filesystem state is opt-in for the Python API through `PublicationOptions` and is always enabled by the CLI. Each output stem has an ASR checkpoint and a manifest. The checkpoint preserves transcript and segmentation state after inference. The manifest is written last and records the complete output generation and file hashes. `--existing skip` and `PublicationOptions(existing="skip")` trust outputs only when the source, contracts, requested formats, manifest, and hashes all agree.
 
@@ -148,7 +155,7 @@ The wheel includes:
 - Required Silero and faster-whisper notices.
 - Forced-aligner text/span helpers, punctuation data, and upstream provenance.
 
-Cohere ASR and MMS alignment weights are not redistributed. Their repository revisions are pinned in the runtime and downloaded from Hugging Face on first use.
+Cohere ASR and MMS alignment weights are not redistributed. The default ASR and MMS revisions are pinned in the runtime and downloaded from Hugging Face on first use. A custom Hub model or adapter resolves to an immutable commit; a local source is passed directly to Transformers or PEFT after canonical path, metadata, and weight-entry validation. Resolved identity, optional revision, detected format, adapter identity, and complete saved quantization configuration are bound into state contracts and retained in result JSON and profile JSON. Python result provenance exposes the identity and detected format without duplicating the complete quantization mapping.
 
 Related ecosystem issues and pull requests are tracked in [Upstream Work](upstream.md). That page separates packaged provenance and implemented local behavior from proposals that remain open or unmerged upstream.
 

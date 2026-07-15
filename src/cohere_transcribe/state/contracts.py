@@ -10,7 +10,6 @@ from typing import Any
 from .._version import __version__
 from ..models import (
     ALIGN_MODEL_REVISION,
-    ASR_MODEL_REVISION,
     OUTPUT_SCHEMA_VERSION,
     SILERO_VERSION,
     TRANSFORMERS_VERSION,
@@ -19,7 +18,7 @@ from ..models import (
 )
 from .io import canonical_json
 
-CONTRACT_SCHEMA_VERSION = 2
+CONTRACT_SCHEMA_VERSION = 3
 
 _ASR_IMPLEMENTATION_FILES = (
     "asr/batching.py",
@@ -32,6 +31,7 @@ _ASR_IMPLEMENTATION_FILES = (
     "audio/preparation.py",
     "audio/segmentation.py",
     "models.py",
+    "model_identity.py",
     "pipeline/resources.py",
     "pipeline/transcription.py",
     "vad/runtime.py",
@@ -121,7 +121,20 @@ def asr_contract_key(args: TranscriptionConfig) -> str:
             "contract_schema_version": CONTRACT_SCHEMA_VERSION,
             "configuration": configuration,
             "models": {
-                "asr_revision": ASR_MODEL_REVISION,
+                "asr": {
+                    "id": args.model,
+                    "revision": args.model_revision,
+                    "format": args.model_format,
+                    "quantization": args.model_quantization,
+                    "adapter": (
+                        {
+                            "id": args.adapter,
+                            "revision": args.adapter_revision,
+                        }
+                        if args.adapter is not None
+                        else None
+                    ),
+                },
                 "silero_version": SILERO_VERSION,
                 "transformers_version": TRANSFORMERS_VERSION,
             },

@@ -88,6 +88,8 @@ def test_api_options_cover_every_non_positional_cli_configuration_field() -> Non
         "output_dir",
         "existing",
         "profile_json",
+        "model_format",
+        "model_quantization",
     }
     assert api_fields == internal_fields
 
