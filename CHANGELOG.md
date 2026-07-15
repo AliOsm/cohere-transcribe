@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4 - 2026-07-15
+
+- Declare the package's Apache-2.0, CC-BY-NC-4.0, and MIT license scopes with PEP 639 metadata, complete license texts, source provenance, and notices included in both distribution formats.
+
 ## 0.1.3 - 2026-07-15
 
 - Continue publishing completed transcripts when resumable ASR checkpoint persistence fails with an I/O error, while reporting the checkpoint warning and retaining fatal handling for invalid checkpoint data.

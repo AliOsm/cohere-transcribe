@@ -252,4 +252,10 @@ See [Performance](https://github.com/AliOsm/cohere-transcribe/blob/main/docs/per
 - [Release reports](https://github.com/AliOsm/cohere-transcribe/tree/main/reports): versioned release-validation evidence.
 - [Changelog](https://github.com/AliOsm/cohere-transcribe/blob/main/CHANGELOG.md): release-level user and developer changes.
 
+## License
+
+Original project code and documentation are licensed under Apache License 2.0. This distribution also contains retained word-alignment helpers under Creative Commons Attribution-NonCommercial 4.0 International and bundled Silero/faster-whisper VAD components under MIT licenses. CC BY-NC 4.0 includes a noncommercial restriction. Runtime-downloaded model weights retain the terms published by their owners; the default MMS alignment model is also CC BY-NC 4.0.
+
+See [LICENSE](https://github.com/AliOsm/cohere-transcribe/blob/main/LICENSE), [NOTICE](https://github.com/AliOsm/cohere-transcribe/blob/main/NOTICE), and [THIRD_PARTY_NOTICES.md](https://github.com/AliOsm/cohere-transcribe/blob/main/THIRD_PARTY_NOTICES.md) for the exact scopes, source revisions, modifications, and included license texts.
+
 Run `cohere-transcribe --help` for the complete CLI reference.

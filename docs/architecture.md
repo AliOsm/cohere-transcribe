@@ -134,7 +134,7 @@ Word alignment is lazy and optional. The `word` extra supplies TorchAudio and Ur
 
 The aligner creates bounded overlapping emission windows, crops normalized FP32 log probabilities, and calls `torchaudio.functional.forced_align`. Emission OOM recovery lowers the active batch without discarding completed windows. Invalid or unalignable segments fall back to explicit approximate timing rather than failing the complete file.
 
-Only four pure-Python normalization and span helpers are required from the maintained forced-aligner project. Their evaluated source is included under `alignment/`, while TorchAudio supplies the alignment kernel. This keeps the wheel self-contained and avoids compiling an unused native extension and CLI stack. `alignment/UPSTREAM.md` records the source repository, revision, and local scope.
+Only three Python normalization and span helpers plus one punctuation-data file are required from Fairseq MMS and the maintained forced-aligner project. Their evaluated source is included under `alignment/` under CC BY-NC 4.0, while TorchAudio supplies the alignment kernel. This keeps the wheel self-contained and avoids compiling an unused native extension and CLI stack. `alignment/UPSTREAM.md` records the source repositories, revisions, local scope, and modifications.
 
 ## Durable State and Publication
 
@@ -152,8 +152,9 @@ The wheel includes:
 
 - The Silero 6.2.1 TorchScript weight used by automatic and explicit JIT VAD.
 - The sequence-based ONNX Silero model used by the optional ONNX engine.
-- Required Silero and faster-whisper notices.
-- Forced-aligner text/span helpers, punctuation data, and upstream provenance.
+- Silero and faster-whisper MIT notices.
+- Fairseq MMS/forced-aligner text and span helpers, punctuation data, the CC BY-NC 4.0 license, and upstream provenance.
+- Apache project licensing plus root notice and complete third-party notices through distribution metadata.
 
 Cohere ASR and MMS alignment weights are not redistributed. The default ASR and MMS revisions are pinned in the runtime and downloaded from Hugging Face on first use. A custom Hub model or adapter resolves to an immutable commit; a local source is passed directly to Transformers or PEFT after canonical path, metadata, and weight-entry validation. Resolved identity, optional revision, detected format, adapter identity, and complete saved quantization configuration are bound into state contracts and retained in result JSON and profile JSON. Python result provenance exposes the identity and detected format without duplicating the complete quantization mapping.
 

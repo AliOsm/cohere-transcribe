@@ -217,6 +217,8 @@ cohere-transcribe input.wav \
 
 FP32 is the timestamp reference. `--align-dtype fp16` is faster on CUDA and closely matched FP32 on the validation corpus, but small timestamp shifts are possible. A segment shorter than two CTC frames or otherwise unalignable falls back to approximate timing; inspect warnings, profile fallback counts, and JSON `timing_source` values when exact provenance matters.
 
+Word mode uses retained Fairseq MMS/ctc-forced-aligner normalization helpers and downloads the MMS alignment model. Both are under Creative Commons Attribution-NonCommercial 4.0 International. The default text and segment modes do not load or execute the word-alignment path, but the installed distribution still includes those helpers. See [Third-Party Notices](../THIRD_PARTY_NOTICES.md) for the exact scope and source revisions.
+
 ## Files and Directories
 
 You can mix files and directories in one command:

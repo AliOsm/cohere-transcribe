@@ -189,6 +189,14 @@ For a release:
 
 Publishing the GitHub Release triggers `release.yml`. Its unprivileged build job checks that the tag matches the package version, builds the wheel and source distribution once, validates their metadata, and transfers those exact artifacts to a minimal PyPI Trusted Publishing job. Quality checks and tests stay in CI rather than being duplicated during publication.
 
+## Licensing and Provenance
+
+This is a mixed-license distribution. Original project code uses Apache License 2.0, retained alignment helpers use CC BY-NC 4.0, and bundled VAD code and assets use MIT. `pyproject.toml` declares the combined SPDX expression and explicitly includes every applicable license and provenance file in built artifacts.
+
+When bundled third-party code or assets change, update `THIRD_PARTY_NOTICES.md`, the owning package's provenance file, the SPDX expression when necessary, and `project.license-files`. Record an exact upstream revision, source URL, local modifications, asset hash where applicable, copyright holder, and license. Never replace a third-party license with the project's Apache license.
+
+For every release, inspect the wheel and source distribution in addition to running Twine. Confirm the core metadata contains the expected `License-Expression` and `License-File` entries and that each declared license file is present in both artifacts.
+
 ## TestPyPI
 
 Use the manual `Publish to TestPyPI` workflow after changing package metadata, dependency metadata, build configuration, or publishing infrastructure.
