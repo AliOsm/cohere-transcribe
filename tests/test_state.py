@@ -33,6 +33,7 @@ from cohere_transcribe.state import (
     restore_asr_checkpoint,
     write_asr_checkpoint,
 )
+from cohere_transcribe.state.io import decode_state, envelope
 
 
 def make_config(
@@ -95,6 +96,60 @@ def publish(job: AudioJob) -> None:
         job,
         [{"start": 0.0, "end": 1.0, "text": job.segment_texts[0]}],
     )
+
+
+def test_state_envelope_rejects_unsupported_schema(tmp_path: Path) -> None:
+    marker = tmp_path / "state.json"
+    wrapped = envelope({"kind": "test"})
+    wrapped["schema_version"] = 999
+    marker.write_text(json.dumps(wrapped), encoding="utf-8")
+
+    payload, reason = decode_state(marker)
+
+    assert payload is None
+    assert reason == "state marker schema is unsupported"
+
+
+def test_state_envelope_rejects_checksum_mismatch(tmp_path: Path) -> None:
+    marker = tmp_path / "state.json"
+    wrapped = envelope({"kind": "test"})
+    payload = wrapped["payload"]
+    assert isinstance(payload, dict)
+    payload["kind"] = "tampered"
+    marker.write_text(json.dumps(wrapped), encoding="utf-8")
+
+    decoded, reason = decode_state(marker)
+
+    assert decoded is None
+    assert reason == "state marker integrity check failed"
+
+
+def test_state_envelope_rejects_truncated_json(tmp_path: Path) -> None:
+    marker = tmp_path / "state.json"
+    marker.write_text('{"schema_version": 1, "payload":', encoding="utf-8")
+
+    payload, reason = decode_state(marker)
+
+    assert payload is None
+    assert reason.startswith("state marker is unreadable (JSONDecodeError:")
+
+
+def test_checkpoint_propagates_directory_sync_failure(tmp_path: Path) -> None:
+    source = tmp_path / "clip.wav"
+    source.write_bytes(b"audio")
+    job = build_one(make_config(source, tmp_path / "out"))
+    try:
+        populate_asr(job)
+        with (
+            mock.patch(
+                "cohere_transcribe.state.io.fsync_directories",
+                side_effect=OSError("simulated directory I/O failure"),
+            ),
+            pytest.raises(OSError, match="directory I/O failure"),
+        ):
+            write_asr_checkpoint(job)
+    finally:
+        release_output_locks([job])
 
 
 def test_asr_and_render_contracts_have_separate_semantics(tmp_path: Path) -> None:

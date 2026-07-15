@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2 - 2026-07-15
+
+- Use one directory-sync policy for outputs, profiles, and resumable state, preserving best-effort behavior on unsupported filesystems while propagating genuine I/O failures.
+- Prevent target-mode and commit-boundary interruption races from leaking resources or escaping rollback, preserve primary transaction diagnostics when cleanup also fails, and retain backups when rollback cannot restore an output.
+- Add exact state-envelope, SRT/VTT rendering, adaptive batch growth, weighted OOM splitting, incomplete rollback, and atomic cleanup regression coverage.
+- Extend strict type checking to the CLI and installation doctor, and reject non-finite values in JSON transcript output.
+
 ## 0.1.1 - 2026-07-15
 
 - Add custom-model selection with immutable Hub revisions and canonical local identities for native dense Cohere ASR checkpoints, saved bitsandbytes INT8/INT4 checkpoints through the `quantized` extra, and safely merged PEFT LoRA adapters through the `adapters` extra.

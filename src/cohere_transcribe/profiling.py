@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from ._durability import fsync_directories
 from ._version import DISTRIBUTION_NAME
 from .models import (
     ALIGN_MODEL_ID,
@@ -34,7 +35,7 @@ from .models import (
     package_version,
     runtime_implementation,
 )
-from .output.publication import apply_file_mode, fsync_directories
+from .output.publication import apply_file_mode
 
 
 def _duration_quantiles(durations: Sequence[float]) -> dict[str, float] | None:
@@ -363,16 +364,16 @@ def build_profile_payload(
 
 
 def write_profile_json(path: Path, payload: dict[str, Any]) -> None:
+    try:
+        output_mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        output_mode = default_output_mode()
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temporary_path = Path(temporary_name)
+    failed = False
     try:
-        output_mode = (
-            stat.S_IMODE(path.stat().st_mode)
-            if path.exists()
-            else default_output_mode()
-        )
         apply_file_mode(descriptor, temporary_path, output_mode)
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             json.dump(
@@ -388,8 +389,13 @@ def write_profile_json(path: Path, payload: dict[str, Any]) -> None:
         os.replace(temporary_path, path)
         fsync_directories(iter((path.parent,)))
     except BaseException:
+        failed = True
         with contextlib.suppress(OSError):
             os.close(descriptor)
         raise
     finally:
-        temporary_path.unlink(missing_ok=True)
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            if not failed:
+                raise

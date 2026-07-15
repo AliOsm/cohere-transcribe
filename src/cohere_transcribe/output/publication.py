@@ -4,16 +4,16 @@ from __future__ import annotations
 
 import contextlib
 import copy
-import errno
 import os
 import shutil
 import stat
 import tempfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 
+from .._durability import fsync_directories
 from ..audio.decoding import decode_audio
 from ..models import (
     SR,
@@ -43,34 +43,6 @@ def apply_file_mode(descriptor: int, path: Path, mode: int) -> None:
         os.chmod(path, mode)
 
 
-def fsync_directories(directories: Iterator[Path]) -> None:
-    """Persist directory entries where the platform supports directory fsync."""
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    unsupported = {
-        errno.EACCES,
-        errno.EBADF,
-        errno.EINVAL,
-        errno.EISDIR,
-        errno.ENOTSUP,
-        errno.EPERM,
-    }
-    for directory in dict.fromkeys(path.resolve() for path in directories):
-        try:
-            descriptor = os.open(directory, flags)
-        except OSError as exc:
-            if exc.errno in unsupported:
-                continue
-            raise
-        try:
-            try:
-                os.fsync(descriptor)
-            except OSError as exc:
-                if exc.errno not in unsupported:
-                    raise
-        finally:
-            os.close(descriptor)
-
-
 def atomic_write_outputs(
     job: AudioJob,
     cues: Sequence[SubtitleCue],
@@ -88,21 +60,21 @@ def atomic_write_outputs(
         return
     temporary_paths: dict[Path, Path] = {}
     backup_paths: dict[Path, Path | None] = {}
-    published: list[Path] = []
+    commit_attempts: list[Path] = []
     preserved_backups: set[Path] = set()
     publication_paths: list[Path] = list(output_paths.values())
+    failed = False
     try:
         for output_format, output_path in output_paths.items():
+            try:
+                output_mode = stat.S_IMODE(output_path.stat().st_mode)
+            except FileNotFoundError:
+                output_mode = default_output_mode()
             descriptor, temporary_name = tempfile.mkstemp(
                 prefix=f".{output_path.name}.", suffix=".tmp", dir=output_path.parent
             )
             temporary_path = Path(temporary_name)
             temporary_paths[output_path] = temporary_path
-            output_mode = (
-                stat.S_IMODE(output_path.stat().st_mode)
-                if output_path.exists()
-                else default_output_mode()
-            )
             try:
                 with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                     if output_format == "json":
@@ -148,28 +120,46 @@ def atomic_write_outputs(
             descriptor, backup_name = tempfile.mkstemp(
                 prefix=f".{output_path.name}.", suffix=".bak", dir=output_path.parent
             )
-            os.close(descriptor)
             backup_path = Path(backup_name)
             backup_paths[output_path] = backup_path
+            os.close(descriptor)
             shutil.copy2(output_path, backup_path)
             with backup_path.open("rb") as backup_handle:
                 os.fsync(backup_handle.fileno())
 
         ensure_source_unchanged(job)
         for output_path in publication_paths:
+            # Register ownership before rename so an asynchronous signal after the
+            # system call still rolls this path back.
+            commit_attempts.append(output_path)
             os.replace(temporary_paths[output_path], output_path)
-            published.append(output_path)
         fsync_directories(output.parent for output in publication_paths)
         job.written.extend(output_paths.values())
         job.published = True
     except BaseException as original_error:
+        failed = True
         rollback_errors: list[str] = []
-        for output_path in reversed(published):
+        for output_path in reversed(commit_attempts):
             rollback_backup = backup_paths.get(output_path)
+            try:
+                temporary_paths[output_path].lstat()
+            except FileNotFoundError:
+                pass
+            except OSError as inspection_error:
+                if rollback_backup is not None and rollback_backup.exists():
+                    preserved_backups.add(rollback_backup)
+                rollback_errors.append(
+                    f"{output_path}: cannot determine commit state: {inspection_error}"
+                )
+                continue
+            else:
+                # A failed rename leaves the owned source in place, so this
+                # destination was not changed by the transaction.
+                continue
             try:
                 if rollback_backup is None:
                     output_path.unlink(missing_ok=True)
-                elif rollback_backup.exists():
+                else:
                     os.replace(rollback_backup, output_path)
             except BaseException as rollback_error:
                 if rollback_backup is not None and rollback_backup.exists():
@@ -187,11 +177,20 @@ def atomic_write_outputs(
             ) from original_error
         raise
     finally:
+        cleanup_errors: list[OSError] = []
         for temporary_path in temporary_paths.values():
-            temporary_path.unlink(missing_ok=True)
+            try:
+                temporary_path.unlink(missing_ok=True)
+            except OSError as cleanup_error:
+                cleanup_errors.append(cleanup_error)
         for cleanup_backup in backup_paths.values():
             if cleanup_backup is not None and cleanup_backup not in preserved_backups:
-                cleanup_backup.unlink(missing_ok=True)
+                try:
+                    cleanup_backup.unlink(missing_ok=True)
+                except OSError as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+        if cleanup_errors and not failed:
+            raise cleanup_errors[0]
 
 
 def complete_job_result(

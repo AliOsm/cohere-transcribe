@@ -245,7 +245,7 @@ def generate_json(
     """Serialize a result payload, building it only when one was not supplied."""
     if payload is None:
         payload = build_result_payload(job, words, cues, transcript_lines)
-    return json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    return json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2) + "\n"
 
 
 OUTPUT_GENERATORS = {"srt": generate_srt, "vtt": generate_vtt}

@@ -17,7 +17,7 @@ from cohere_transcribe.alignment.runtime import (
     _compute_emissions_streaming,
     uniform_word_timings_across_spans,
 )
-from cohere_transcribe.asr.batching import ASRBatchController
+from cohere_transcribe.asr.batching import ASRBatchController, balanced_oom_split
 from cohere_transcribe.asr.execution import (
     apply_generation_metadata,
     finish_asr_batch,
@@ -92,6 +92,81 @@ class AdaptiveBatchControllerTest(unittest.TestCase):
 
         controller.configure_group(args, refs_with_duration(4, 30.0))
         self.assertEqual(controller.audio_budget_seconds, 120.0)
+
+    def test_success_grows_an_adaptive_batch_with_memory_headroom(self) -> None:
+        gib = 1024**3
+        controller = ASRBatchController(
+            current_size=24,
+            max_size=48,
+            audio_budget_seconds=720.0,
+            adaptive=True,
+            target_vram_ratio=0.9,
+            total_vram_bytes=12 * gib,
+            memory_budget_bytes=10 * gib,
+            initial_size=24,
+        )
+        result = ASRGenerationResult(
+            generated=torch.empty((0, 0), dtype=torch.long),
+            row_token_counts=[],
+            truncated_ref_indices=set(),
+            repetition_ref_indices=set(),
+            max_new_tokens=445,
+            prompt_length=0,
+            call_wall_seconds=0.0,
+            device_generate_seconds=0.0,
+            analysis_seconds=0.0,
+            baseline_reserved_bytes=4 * gib,
+            peak_reserved_bytes=6 * gib,
+        )
+
+        controller.record_success(result, attempted_rows=24)
+
+        self.assertEqual(controller.current_size, 30)
+
+    def test_success_respects_memory_estimate_and_oom_cooldown(self) -> None:
+        gib = 1024**3
+        controller = ASRBatchController(
+            current_size=24,
+            max_size=48,
+            audio_budget_seconds=720.0,
+            adaptive=True,
+            target_vram_ratio=0.9,
+            total_vram_bytes=10 * gib,
+            memory_budget_bytes=9 * gib,
+            initial_size=24,
+            growth_cooldown=1,
+        )
+        result = ASRGenerationResult(
+            generated=torch.empty((0, 0), dtype=torch.long),
+            row_token_counts=[],
+            truncated_ref_indices=set(),
+            repetition_ref_indices=set(),
+            max_new_tokens=445,
+            prompt_length=0,
+            call_wall_seconds=0.0,
+            device_generate_seconds=0.0,
+            analysis_seconds=0.0,
+            baseline_reserved_bytes=1 * gib,
+            peak_reserved_bytes=int(8.4 * gib),
+        )
+
+        controller.record_success(result, attempted_rows=24)
+        self.assertEqual((controller.current_size, controller.growth_cooldown), (24, 0))
+
+        controller.record_success(result, attempted_rows=24)
+        self.assertEqual(controller.current_size, 25)
+
+    def test_weighted_oom_split_balances_unequal_padded_durations(self) -> None:
+        job = SimpleNamespace(index=0)
+        durations = [30.0, 20.0, 10.0, 10.0, 10.0, 10.0]
+        refs = [
+            SegmentRef(job, index, 0.0, duration)
+            for index, duration in enumerate(durations)
+        ]
+
+        split = balanced_oom_split(refs)
+
+        self.assertEqual(split, 2)
 
 
 class DecoderSafetyTest(unittest.TestCase):

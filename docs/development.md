@@ -65,7 +65,7 @@ Run the normal source checks:
 uv lock --check
 uv run --no-sync ruff format --check .
 uv run --no-sync ruff check .
-uv run --no-sync mypy --strict scripts/typecheck_public_api.py
+uv run --no-sync mypy --strict scripts/typecheck_public_api.py src/cohere_transcribe/cli.py src/cohere_transcribe/doctor.py src/cohere_transcribe/doctor_support.py src/cohere_transcribe/__main__.py
 uv run --no-sync pytest
 ```
 
@@ -79,7 +79,7 @@ Any new CLI option must have parser, accepted-value, rejected-value, inactive-mo
 
 Every CLI transcription option must map to `TranscriptionOptions`, with filesystem settings grouped under `PublicationOptions`. API coverage should include one path, ordered path sequences, recursive directory expansion, duplicate removal, in-memory execution, publication, verified skips, partial failures, `raise_on_error`, immutable result snapshots, progress callbacks, process serialization, reentrant-use rejection, lazy model loading, reuse, eviction, and close behavior. Test the one-shot helper and reusable context manager independently.
 
-Public exports must remain statically visible from `cohere_transcribe`, and the wheel must include `py.typed`. Strictly type-check `scripts/typecheck_public_api.py` in the source environment. Test public imports and the typing marker from an installed wheel outside the source checkout so an undeclared file or accidental checkout import cannot hide a distribution problem. A clean import should expose API types without importing the ML runtime.
+Public exports must remain statically visible from `cohere_transcribe`, and the wheel must include `py.typed`. Strictly type-check the public API fixture and shipped CLI entry points in the source environment. Test public imports and the typing marker from an installed wheel outside the source checkout so an undeclared file or accidental checkout import cannot hide a distribution problem. A clean import should expose API types without importing the ML runtime.
 
 ## Dependency Rules
 

@@ -9,6 +9,7 @@ import math
 import shutil
 import sys
 from collections.abc import Sequence
+from types import ModuleType
 
 from packaging.version import Version
 
@@ -42,7 +43,7 @@ from .models import (
 )
 
 
-def import_required(results: Results, module: str, feature: str):
+def import_required(results: Results, module: str, feature: str) -> ModuleType | None:
     try:
         imported = importlib.import_module(module)
     except Exception as exc:
@@ -81,7 +82,7 @@ def validate_files(results: Results) -> None:
             )
 
 
-def validate_common_runtime(results: Results):
+def validate_common_runtime(results: Results) -> ModuleType | None:
     results.ok(f"Python {sys.version.split()[0]}")
 
     torch = import_required(results, "torch", "PyTorch")
@@ -121,7 +122,7 @@ def validate_common_runtime(results: Results):
     return torch
 
 
-def validate_silero(results: Results, torch) -> None:
+def validate_silero(results: Results, torch: ModuleType | None) -> None:
     onnx_available = False
     if importlib.util.find_spec("onnxruntime") is not None:
         onnx_available = (
@@ -210,7 +211,7 @@ def validate_silero(results: Results, torch) -> None:
             results.ok("packed Torch Silero executes on CPU")
 
 
-def validate_word_alignment(results: Results, torch) -> None:
+def validate_word_alignment(results: Results, torch: ModuleType | None) -> None:
     torchaudio = import_required(results, "torchaudio", "word alignment")
     alignment_utils = import_required(
         results,
@@ -273,7 +274,7 @@ def validate_word_alignment(results: Results, torch) -> None:
         f"{torchaudio.__version__}"
     )
     try:
-        from torchaudio.functional import forced_align
+        from torchaudio.functional import forced_align  # type: ignore[import-untyped]
 
         emissions = torch.log_softmax(
             torch.tensor([[[4.0, 0.0], [0.0, 4.0]]], dtype=torch.float32), dim=-1
@@ -347,7 +348,7 @@ def validate_model_access(
     results: Results,
     include_aligner: bool,
     *,
-    torch_runtime=None,
+    torch_runtime: ModuleType | None = None,
     model_id: str = MODEL_ID,
     model_revision: str | None = None,
     adapter_id: str | None = None,

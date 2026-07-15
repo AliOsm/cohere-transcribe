@@ -33,8 +33,14 @@ jobs:
         run: uv run --no-sync ruff format --check .
       - name: Lint
         run: uv run --no-sync ruff check .
-      - name: Check public API typing
-        run: uv run --no-sync mypy --strict scripts/typecheck_public_api.py
+      - name: Check typing
+        run: |
+          uv run --no-sync mypy --strict \
+            scripts/typecheck_public_api.py \
+            src/cohere_transcribe/cli.py \
+            src/cohere_transcribe/doctor.py \
+            src/cohere_transcribe/doctor_support.py \
+            src/cohere_transcribe/__main__.py
 
   tests:
     name: Python ${{ matrix.python-version }}

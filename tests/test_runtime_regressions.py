@@ -369,6 +369,37 @@ class RuntimeRegressionTest(unittest.TestCase):
         ):
             fsync_directories(iter((Path("."),)))
 
+    def test_real_directory_fsync_failure_is_propagated(self) -> None:
+        with (
+            mock.patch.object(outputs.os, "open", return_value=41),
+            mock.patch.object(
+                outputs.os,
+                "fsync",
+                side_effect=OSError(errno.EIO, "directory sync failed"),
+            ),
+            mock.patch.object(outputs.os, "close") as close,
+            self.assertRaisesRegex(OSError, "directory sync failed"),
+        ):
+            fsync_directories(iter((Path("."),)))
+        close.assert_called_once_with(41)
+
+    def test_directory_close_does_not_mask_a_sync_failure(self) -> None:
+        with (
+            mock.patch.object(outputs.os, "open", return_value=42),
+            mock.patch.object(
+                outputs.os,
+                "fsync",
+                side_effect=OSError(errno.EIO, "primary sync failure"),
+            ),
+            mock.patch.object(
+                outputs.os,
+                "close",
+                side_effect=OSError(errno.EBADF, "secondary close failure"),
+            ),
+            self.assertRaisesRegex(OSError, "primary sync failure"),
+        ):
+            fsync_directories(iter((Path("."),)))
+
     def test_source_change_rejects_transactional_publication(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

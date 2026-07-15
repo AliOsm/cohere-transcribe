@@ -14,6 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from .._durability import fsync_directories
 from ..models import AudioJob, SourceSnapshot, default_output_mode
 
 STATE_SCHEMA_VERSION = 1
@@ -115,11 +116,14 @@ def match_source_and_generation(
 def create_state_temporary(path: Path, payload: Mapping[str, Any]) -> Path:
     if path.is_symlink():
         raise RuntimeError(f"State marker must not be a symlink: {path}")
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        mode = default_output_mode()
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
     )
     temporary_path = Path(temporary_name)
-    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else default_output_mode()
     try:
         if callable(getattr(os, "fchmod", None)):
             os.fchmod(descriptor, mode)
@@ -137,22 +141,10 @@ def create_state_temporary(path: Path, payload: Mapping[str, Any]) -> Path:
     except BaseException:
         with contextlib.suppress(OSError):
             os.close(descriptor)
-        temporary_path.unlink(missing_ok=True)
+        with contextlib.suppress(OSError):
+            temporary_path.unlink(missing_ok=True)
         raise
     return temporary_path
-
-
-def fsync_directory(directory: Path) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    try:
-        descriptor = os.open(directory, flags)
-    except OSError:
-        return
-    try:
-        with contextlib.suppress(OSError):
-            os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
 
 
 def write_state_atomic(
@@ -163,8 +155,16 @@ def write_state_atomic(
     if SourceSnapshot.capture(job.path) != job.snapshot:
         raise RuntimeError(f"Source changed while processing: {job.path}")
     temporary_path = create_state_temporary(path, payload)
+    failed = False
     try:
         os.replace(temporary_path, path)
-        fsync_directory(path.parent)
+        fsync_directories((path.parent,))
+    except BaseException:
+        failed = True
+        raise
     finally:
-        temporary_path.unlink(missing_ok=True)
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            if not failed:
+                raise
