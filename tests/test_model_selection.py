@@ -444,6 +444,96 @@ def test_default_and_explicit_commits_resolve_without_hub_lookup(monkeypatch) ->
     assert resolve_model_revision("owner/model", custom_commit) == custom_commit.lower()
 
 
+@pytest.mark.parametrize(
+    "revision",
+    [None, DEFAULT_ASR_MODEL_REVISION, DEFAULT_ASR_MODEL_REVISION.upper()],
+)
+def test_packaged_default_identity_and_weights_need_no_hub_access(
+    monkeypatch, revision: str | None
+) -> None:
+    from huggingface_hub import HfApi
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", fail_hub_call)
+    monkeypatch.setattr(HfApi, "list_repo_files", fail_hub_call)
+
+    identity = resolve_model_identity(DEFAULT_ASR_MODEL_ID, revision)
+    verify_model_weight_artifacts(identity)
+
+    assert identity.model_id == DEFAULT_ASR_MODEL_ID
+    assert identity.model_revision == DEFAULT_ASR_MODEL_REVISION
+    assert identity.model_format == "dense"
+    assert identity.quantization_config is None
+
+
+def test_another_default_repository_revision_still_inspects_its_config(
+    monkeypatch,
+) -> None:
+    revision = "1" * 40
+    inspected: list[tuple[str, str | None, str]] = []
+    allow_test_weight_artifacts(monkeypatch)
+
+    def inspect(reference: str, resolved_revision: str | None, filename: str):
+        inspected.append((reference, resolved_revision, filename))
+        return {
+            "model_type": "cohere_asr",
+            "quantization_config": {
+                "quant_method": "bitsandbytes",
+                "load_in_8bit": True,
+            },
+        }
+
+    monkeypatch.setattr("cohere_transcribe.model_identity._reference_json", inspect)
+
+    identity = resolve_model_identity(DEFAULT_ASR_MODEL_ID, revision)
+
+    assert identity.model_revision == revision
+    assert identity.model_format == "bitsandbytes-int8"
+    assert inspected == [(DEFAULT_ASR_MODEL_ID, revision, "config.json")]
+
+
+def test_packaged_default_adapter_metadata_and_weights_are_still_validated(
+    monkeypatch,
+) -> None:
+    adapter_revision = "2" * 40
+    inspected: list[tuple[str, str | None, str]] = []
+    verified: list[tuple[str, str | None, str]] = []
+    monkeypatch.setattr(
+        "cohere_transcribe.model_identity.resolve_adapter_revision",
+        lambda *_args: adapter_revision,
+    )
+
+    def inspect(reference: str, revision: str | None, filename: str):
+        inspected.append((reference, revision, filename))
+        return {
+            "base_model_name_or_path": DEFAULT_ASR_MODEL_ID,
+            "peft_type": "LORA",
+            "task_type": "SEQ_2_SEQ_LM",
+        }
+
+    def verify(reference: str, revision: str | None, *, description: str, **_kwargs):
+        verified.append((reference, revision, description))
+
+    monkeypatch.setattr("cohere_transcribe.model_identity._reference_json", inspect)
+    monkeypatch.setattr(
+        "cohere_transcribe.model_identity._verify_weight_artifacts", verify
+    )
+
+    identity = resolve_model_identity(
+        DEFAULT_ASR_MODEL_ID,
+        None,
+        "owner/adapter",
+        adapter_revision,
+    )
+
+    assert identity.adapter_revision == adapter_revision
+    assert inspected == [
+        ("owner/adapter", adapter_revision, "adapter_config.json"),
+    ]
+    assert verified == [
+        ("owner/adapter", adapter_revision, "PEFT adapter weights"),
+    ]
+
+
 def test_symbolic_revision_resolves_from_the_snapshot_cache_path(
     tmp_path, monkeypatch
 ) -> None:

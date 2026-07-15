@@ -50,6 +50,11 @@ def default_model_revision(model_id: str, revision: str | None) -> str | None:
     return revision
 
 
+def _is_packaged_default_model(model_id: str, revision: str | None) -> bool:
+    """Return whether a reference is the package's immutable default snapshot."""
+    return model_id == DEFAULT_ASR_MODEL_ID and revision == DEFAULT_ASR_MODEL_REVISION
+
+
 def resolve_local_directory(reference: str, *, description: str) -> str | None:
     """Return a canonical local directory, or ``None`` for a possible Hub ID."""
     try:
@@ -268,11 +273,15 @@ def resolve_model_identity(
         resolved_model_id = model_id
         resolved_model_revision = resolve_model_revision(model_id, model_revision)
 
-    model_config = _reference_json(
-        resolved_model_id, resolved_model_revision, "config.json"
-    )
-    reference = model_reference(resolved_model_id, resolved_model_revision)
-    model_format, quantization = classify_model_config(model_config, reference)
+    if _is_packaged_default_model(resolved_model_id, resolved_model_revision):
+        model_format: ModelFormat = "dense"
+        quantization = None
+    else:
+        model_config = _reference_json(
+            resolved_model_id, resolved_model_revision, "config.json"
+        )
+        reference = model_reference(resolved_model_id, resolved_model_revision)
+        model_format, quantization = classify_model_config(model_config, reference)
     resolved_adapter_id = None
     resolved_adapter_revision = None
     if adapter_id is not None:
@@ -336,13 +345,14 @@ def resolve_model_identity(
 
 def verify_model_weight_artifacts(identity: ResolvedModelIdentity) -> None:
     """Require weight entry points only when a run must load the ASR model."""
-    _verify_weight_artifacts(
-        identity.model_id,
-        identity.model_revision,
-        metadata_filename="config.json",
-        candidates=_MODEL_WEIGHT_FILES,
-        description="Transformers model weights",
-    )
+    if not _is_packaged_default_model(identity.model_id, identity.model_revision):
+        _verify_weight_artifacts(
+            identity.model_id,
+            identity.model_revision,
+            metadata_filename="config.json",
+            candidates=_MODEL_WEIGHT_FILES,
+            description="Transformers model weights",
+        )
     if identity.adapter_id is not None:
         _verify_weight_artifacts(
             identity.adapter_id,
